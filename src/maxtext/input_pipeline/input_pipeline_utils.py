@@ -976,6 +976,266 @@ class ShiftData(grain.MapTransform):
     return shift_and_refine(element, ignored_ids=self.ignored_ids, axis=self.axis)
 
 
+def megatron_min_segment_length(config) -> int:
+  """Return Megatron's short-segment merge threshold for *config*.
+
+  Megatron's ``_build_packed_seq_params`` uses ``seq_len // N`` (with ``N``
+  controlled by ``packing_max_segments_per_sample``) and only applies it when
+  the attention mask is reset per document.
+  """
+  if not config.reset_attention_mask:
+    return 0
+  divisor = config.packing_max_segments_per_sample
+  if divisor <= 0:
+    return 0
+  return config.max_target_length // divisor
+
+
+def _merge_short_segments_np(
+    segmentation: np.ndarray,
+    position: np.ndarray,
+    min_seg_len: int,
+) -> None:
+  """Merge segments shorter than *min_seg_len* (greedy forward scan, in-place).
+
+  Matches Megatron ``_build_packed_seq_params``: a boundary is kept only when
+  the distance from the last kept boundary is ``>= min_seg_len``.  When a
+  boundary is dropped, the short segment is absorbed into the preceding one --
+  its tokens continue the previous segment's ID and position counter.
+
+  Args:
+    segmentation: ``[seq_len]`` segment IDs (1-indexed).
+    position:     ``[seq_len]`` per-document position IDs.
+    min_seg_len:  Minimum token count for a segment to survive as independent.
+  """
+  seq_len = len(segmentation)
+  if min_seg_len <= 1 or seq_len == 0:
+    return
+
+  boundaries = np.flatnonzero(np.diff(segmentation)) + 1
+  seg_starts = [0, *boundaries.tolist()]
+
+  if len(seg_starts) <= 1:
+    return
+
+  kept = [0]
+  for start in seg_starts[1:]:
+    if start - kept[-1] > min_seg_len:
+      kept.append(start)
+
+  if len(kept) == len(seg_starts):
+    return
+
+  kept.append(seq_len)
+  for seg_idx in range(len(kept) - 1):
+    s, e = kept[seg_idx], kept[seg_idx + 1]
+    segmentation[s:e] = seg_idx + 1
+    position[s:e] = np.arange(e - s, dtype=position.dtype)
+
+
+@dataclasses.dataclass
+class GenerateDocSegmentIds(grain.MapTransform):
+  # Megatron 数据迁移：文档边界位置编码
+  """Generate segmentation and position arrays from EOD tokens within samples.
+
+  Detects EOD tokens (``eod_id``) within each sample and generates proper
+  ``_segmentation`` and ``_position`` arrays.
+
+  This is used with ``MMapSampleIndexDataSource`` which inserts EOD tokens
+  between concatenated documents.
+
+  Args:
+    eod_id: Token ID that marks the end of a document.
+    reset_attention_mask: Controls how document boundaries affect attention.
+
+      * ``True`` (default) -- attention resets at every document boundary.
+        EOD belongs to the preceding document (same segment ID), and a new
+        segment starts after EOD.  Positions continue through EOD and reset
+        after EOD.
+
+        ::
+
+            tokens:        [tok tok tok EOD tok tok EOD tok tok tok tok tok]
+            segmentation:  [ 1   1   1   1   2   2   2   3   3   3   3   3]
+            positions:     [ 0   1   2   3   0   1   2   0   1   2   3   4]
+
+      * ``False`` -- cross-document attention is allowed.  All non-EOD
+        tokens share the same segment ID (``1``), and positions are a
+        continuous ``arange`` over the whole sequence.
+
+        ::
+
+            tokens:        [tok tok tok EOD tok tok EOD tok tok tok tok tok]
+            segmentation:  [ 1   1   1   0   1   1   0   1   1   1   1   1]  (eod_mask_loss=True)
+            segmentation:  [ 1   1   1   1   1   1   1   1   1   1   1   1]  (eod_mask_loss=False)
+            positions:     [ 0   1   2   3   4   5   6   7   8   9  10  11]
+
+    eod_mask_loss: When True, EOD tokens get segmentation=0 (excluded from loss).
+      When False (default), EOD tokens get segmentation=1 (included in loss).
+      Only applies when reset_attention_mask=False.
+  """
+
+  def __init__(
+      self, eod_id: int, reset_attention_mask: bool = True, eod_mask_loss: bool = False, min_segment_length: int = 0
+  ):
+    self.eod_id = eod_id
+    self.reset_attention_mask = reset_attention_mask
+    self.eod_mask_loss = eod_mask_loss
+    self.min_segment_length = min_segment_length
+
+  def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Apply EOD-based segmentation and loss masking to each column."""
+    for col, tokens in list(element.items()):
+      seq_len = tokens.shape[0]
+      is_eod = tokens == self.eod_id
+
+      if self.reset_attention_mask:
+        # EOD belongs to the preceding document: keep current seg_id and
+        # continue position counter.  New segment starts AFTER EOD.
+        segmentation = np.zeros(seq_len, dtype=np.int32)
+        position = np.zeros(seq_len, dtype=np.int32)
+        seg_id = 1
+        pos_in_doc = 0
+        for i in range(seq_len):
+          if is_eod[i]:
+            # EOD keeps the preceding document's seg_id and position
+            segmentation[i] = seg_id
+            position[i] = pos_in_doc
+            pos_in_doc += 1
+            # New segment starts after EOD
+            seg_id += 1
+            pos_in_doc = 0
+          else:
+            segmentation[i] = seg_id
+            position[i] = pos_in_doc
+            pos_in_doc += 1
+        if self.min_segment_length > 0:
+          _merge_short_segments_np(segmentation, position, self.min_segment_length)
+      else:
+        if self.eod_mask_loss:
+          segmentation = np.where(is_eod, np.int32(0), np.int32(1))
+        else:
+          segmentation = np.ones(seq_len, dtype=np.int32)
+        position = np.arange(seq_len, dtype=np.int32)
+
+      element[f"{col}_segmentation"] = segmentation
+      element[f"{col}_position"] = position
+    return element
+
+
+@dataclasses.dataclass
+class MegatronSplitInputsTargets(grain.MapTransform):
+  # Megatron 数据迁移：输入目标拆分与掩码对齐
+  """Split seq_length+1 tokens into inputs/targets following Megatron-LM convention.
+
+  Input:  ``{"text": tokens}`` where ``len(tokens) == seq_length + 1``
+  Output: ``{"inputs": tokens[:-1], "targets": tokens[1:],
+            "inputs_segmentation": ..., "targets_segmentation": ...,
+            "inputs_position": ..., "targets_position": ...}``
+
+  This gives valid prediction targets at every position without padding,
+  unlike the ShiftData approach which wastes the last position.
+
+  The three output array groups are constructed independently to match
+  Megatron-LM's separate attention_mask / loss_mask / position_ids:
+
+  - ``inputs_segmentation`` (attention): controlled by ``reset_attention_mask``.
+    When True, EOD belongs to its preceding document (same segment ID) and
+    a new segment starts after EOD; when False, all tokens share segment 1.
+  - ``targets_segmentation`` (loss): controlled by ``eod_mask_loss`` only.
+    When True, positions where ``inputs == eod_id`` get segmentation=0
+    (excluded from loss); when False, all positions get segmentation=1.
+  - ``inputs_position`` (RoPE): controlled by ``reset_attention_mask``.
+    When True, EOD continues the preceding document's position counter and
+    resets to 0 after EOD; when False, positions are sequential.
+
+  Args:
+    eod_id: Token ID that marks the end of a document.
+    reset_attention_mask: Controls how document boundaries affect attention
+      and position encoding. When True, attention is blocked across
+      document boundaries and position IDs reset after each EOD token.
+    eod_mask_loss: When True, positions where inputs contain EOD get
+      targets_segmentation=0 (excluded from loss). When False (default),
+      all positions participate in loss.
+  """
+
+  def __init__(
+      self,
+      eod_id: int,
+      reset_attention_mask: bool = True,
+      eod_mask_loss: bool = False,
+      no_attnmask_dataset_ids: set[int] | None = None,
+      min_segment_length: int = 0,
+      emit_dataset_id: bool = False,
+  ):
+    self.eod_id = eod_id
+    self.reset_attention_mask = reset_attention_mask
+    self.eod_mask_loss = eod_mask_loss
+    self.no_attnmask_dataset_ids = no_attnmask_dataset_ids or set()
+    self._has_no_attnmask = bool(self.no_attnmask_dataset_ids)
+    self.min_segment_length = min_segment_length
+    self.emit_dataset_id = emit_dataset_id
+
+  def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Split tokens into input/target pairs with EOD-based segmentation."""
+    tokens = element["text"]
+    inputs = tokens[:-1]
+    targets = tokens[1:]
+
+    seq_len = inputs.shape[0]
+    is_eod = inputs == self.eod_id
+
+    # Per-sample override: datasets in no_attnmask_dataset_ids bypass
+    # attention mask reset (antllm no_attnmask_data behavior).
+    effective_reset = self.reset_attention_mask
+    if self._has_no_attnmask:
+      dataset_id = element.get("dataset_id", None)
+      if dataset_id is not None and int(dataset_id) in self.no_attnmask_dataset_ids:
+        effective_reset = False
+
+    # --- inputs_segmentation (attention mask) ---
+    if effective_reset:
+      input_segmentation = np.zeros(seq_len, dtype=np.int32)
+      position = np.zeros(seq_len, dtype=np.int32)
+      seg_id = 1
+      pos_in_doc = 0
+      for i in range(seq_len):
+        if is_eod[i]:
+          # EOD belongs to the preceding document: keep current seg_id,
+          # continue position counter.  New segment starts AFTER EOD.
+          input_segmentation[i] = seg_id
+          position[i] = pos_in_doc
+          pos_in_doc = 0
+          seg_id += 1
+        else:
+          input_segmentation[i] = seg_id
+          position[i] = pos_in_doc
+          pos_in_doc += 1
+      if self.min_segment_length > 0:
+        _merge_short_segments_np(input_segmentation, position, self.min_segment_length)
+    else:
+      input_segmentation = np.ones(seq_len, dtype=np.int32)
+      position = np.arange(seq_len, dtype=np.int32)
+
+    # --- targets_segmentation (loss mask) ---
+    # Independent of reset_attention_mask, matching Megatron's separate
+    # loss_mask which only depends on eod_mask_loss.
+    if self.eod_mask_loss:
+      target_segmentation = np.where(is_eod, np.int32(0), np.int32(1))
+    else:
+      target_segmentation = np.ones(seq_len, dtype=np.int32)
+
+    result = {
+        "inputs": inputs,
+        "targets": targets,
+        "inputs_segmentation": input_segmentation,
+        "targets_segmentation": target_segmentation,
+        "inputs_position": position,
+        "targets_position": position,
+    }
+    if self.emit_dataset_id and "dataset_id" in element:
+      result["dataset_id"] = np.full(seq_len, int(element["dataset_id"]), dtype=np.int32)
+    return result
 @dataclasses.dataclass
 class ComputeQwen3OmniPositions(grain.MapTransform):
   """Computes 3D position IDs for Qwen3-Omni multimodal sequences.

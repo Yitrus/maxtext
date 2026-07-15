@@ -1280,7 +1280,7 @@ class GrainDataset(BaseModel):
   )
   grain_file_type: str = Field(
       "arrayrecord",
-      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet.",
+      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet, mmap, mmap_npy.",
   )
   grain_use_elastic_iterator: bool = Field(
       False,
@@ -1305,6 +1305,21 @@ class GrainDataset(BaseModel):
       description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.",
   )
   grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
+
+
+class MMapDataset(BaseModel):
+  """Configuration for Megatron-LM MMap indexed datasets."""
+
+  mmap_eod_id: int = Field(0, description="End-of-document token ID for mmap/mmap_npy data.")
+  blend_cache_dir: PathStr = Field("", description="Cache directory for generated Megatron blend indices.")
+  blend_index_dir: PathStr = Field("", description="Directory for pre-generated Megatron blend indices.")
+  reset_attention_mask: bool = Field(True, description="Reset attention and positions after every EOD token.")
+  eod_mask_loss: bool = Field(False, description="Exclude EOD tokens from the loss.")
+  packing_max_segments_per_sample: int = Field(
+      25, description="Megatron short-segment merge divisor; set <=0 to disable merging."
+  )
+  mmap_split_sentences: bool = Field(False, description="Use document-level indexing for sentence-split mmap data.")
+  mmap_npy_split: str = Field("", description="Megatron split ratio, e.g. '99,1' or '98,1,1'.")
 
 
 class OlmoGrainDataset(BaseModel):
@@ -2483,6 +2498,7 @@ class MaxTextConfig(
     TfdsDataset,
     HfDataset,
     GrainDataset,
+    MMapDataset,
     OlmoGrainDataset,
     Tokenizer,
     # Inference
