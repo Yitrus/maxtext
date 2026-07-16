@@ -180,6 +180,7 @@ class DatasetType(str, Enum):
   TFDS = "tfds"
   C4MLPERF = "c4_mlperf"
   OLMO_GRAIN = "olmo_grain"
+  MEGATRON_MMAP = "megatron_mmap"
 
 
 class SamplingStrategy(str, Enum):
@@ -1280,7 +1281,7 @@ class GrainDataset(BaseModel):
   )
   grain_file_type: str = Field(
       "arrayrecord",
-      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet, mmap, mmap_npy.",
+      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet.",
   )
   grain_use_elastic_iterator: bool = Field(
       False,
@@ -1307,10 +1308,16 @@ class GrainDataset(BaseModel):
   grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
 
 
-class MMapDataset(BaseModel):
-  """Configuration for Megatron-LM MMap indexed datasets."""
+class MegatronMMapDataset(BaseModel):
+  """Configuration for ``dataset_type='megatron_mmap'`` sources."""
 
-  mmap_eod_id: int = Field(0, description="End-of-document token ID for mmap/mmap_npy data.")
+  megatron_train_files: PathStr = Field("", description="Training Megatron mmap dataset specification.")
+  megatron_eval_files: PathStr = Field("", description="Evaluation Megatron mmap dataset specification.")
+  megatron_mmap_mode: Literal["mmap", "mmap_npy"] = Field(
+      "mmap_npy", description="Megatron source format: direct mmap or indexed mmap_npy."
+  )
+
+  mmap_eod_id: int = Field(0, description="End-of-document token ID for Megatron mmap data.")
   blend_cache_dir: PathStr = Field("", description="Cache directory for generated Megatron blend indices.")
   blend_index_dir: PathStr = Field("", description="Directory for pre-generated Megatron blend indices.")
   reset_attention_mask: bool = Field(True, description="Reset attention and positions after every EOD token.")
@@ -1318,7 +1325,9 @@ class MMapDataset(BaseModel):
   packing_max_segments_per_sample: int = Field(
       25, description="Megatron short-segment merge divisor; set <=0 to disable merging."
   )
-  mmap_split_sentences: bool = Field(False, description="Use document-level indexing for sentence-split mmap data.")
+  mmap_split_sentences: bool = Field(
+      False, description="Use document-level indexing for sentence-split Megatron mmap data."
+  )
   mmap_npy_split: str = Field("", description="Megatron split ratio, e.g. '99,1' or '98,1,1'.")
 
 
@@ -2498,7 +2507,7 @@ class MaxTextConfig(
     TfdsDataset,
     HfDataset,
     GrainDataset,
-    MMapDataset,
+    MegatronMMapDataset,
     OlmoGrainDataset,
     Tokenizer,
     # Inference
@@ -3360,6 +3369,11 @@ class MaxTextConfig(
         raise ValueError("When dataset_type=grain, please set grain_train_files or grain_train_mixture_config_path")
       if self.eval_interval > 0 and not self.grain_eval_files:
         raise ValueError("Please specify grain_eval_files or set eval_interval to <=0.")
+    elif self.dataset_type == DatasetType.MEGATRON_MMAP:
+      if not self.megatron_train_files:
+        raise ValueError("When dataset_type=megatron_mmap, please set megatron_train_files")
+      if self.eval_interval > 0 and not self.megatron_eval_files:
+        raise ValueError("Please specify megatron_eval_files or set eval_interval to <=0.")
     elif self.dataset_type == DatasetType.TFDS:
       logger.warning(
           "tfds pipeline is deprecated. Use dataset_type=grain, grain_file_type=tfrecord, and provide grain_train_files."

@@ -42,7 +42,7 @@ DTYPE_CODES_INV = {v: k for k, v in DTYPE_CODES.items()}
 
 
 @dataclasses.dataclass(frozen=True)
-class MMapDatasetConfig:
+class MegatronMMapDatasetConfig:
   """Dataset-specific config for mmap / mmap_npy formats."""
 
   max_target_length: int

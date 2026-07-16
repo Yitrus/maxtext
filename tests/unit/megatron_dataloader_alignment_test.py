@@ -48,8 +48,10 @@ from maxtext.input_pipeline._mmap_index_utils import (
     convert,
 )
 from tests.unit.mmap_test_utils import create_mmap_test_data
+from tests.unit.mmap_test_utils import get_megatron_mmap_dataset as get_datasets
+from tests.unit.mmap_test_utils import preprocess_megatron_mmap as pretrain_preprocessing_pipeline
 from maxtext.input_pipeline._mmap_datasource import (
-    MMapDatasetConfig,
+    MegatronMMapDatasetConfig,
     MegatronNpyDataSource,
     _discover_npy_indices,
     create_mmap_npy_source,
@@ -435,8 +437,6 @@ class TestMultiHostSharding:
   @staticmethod
   def _get_host_samples(out_dir, prefix, seq_length, host_index, host_count):
     """Iterate a per-host sharded dataset via get_datasets."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     pattern = f"{out_dir}|{prefix}"
     ds = get_datasets(
         data_file_pattern=pattern,
@@ -451,7 +451,7 @@ class TestMultiHostSharding:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(
+        dataset_config=MegatronMMapDatasetConfig(
             max_target_length=seq_length,
             eod_id=0,
             mmap_split_sentences=False,
@@ -553,8 +553,6 @@ class TestBlendAlignment:
 
   def test_blend_then_shard_reconstructs_global(self, tmp_dir):
     """Blend-then-shard across 4 hosts, interleaved back, equals global blend."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     seq_length = 8
     num_hosts = 4
 
@@ -572,7 +570,7 @@ class TestBlendAlignment:
     convert([prefix_b], out_b, seq_length=seq_length, num_epochs=1, seed=42)
 
     blend_pattern = f"{out_a}|{prefix_a},0.7;{out_b}|{prefix_b},0.3"
-    ds_cfg = MMapDatasetConfig(max_target_length=seq_length, eod_id=0, mmap_split_sentences=False)
+    ds_cfg = MegatronMMapDatasetConfig(max_target_length=seq_length, eod_id=0, mmap_split_sentences=False)
 
     def _get_samples(host_index, host_count):
       ds = get_datasets(
@@ -725,7 +723,6 @@ class TestBlendAlignment:
     Token sequences are compared element-by-element.
     """
     from megatron.core.datasets.blended_dataset import BlendedDataset  # pylint: disable=import-outside-toplevel
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
 
     eod_id = 0
     seq_length = 8
@@ -754,7 +751,7 @@ class TestBlendAlignment:
 
     # ---- MaxText side: iterate through Grain pipeline ----------------------
     blend_pattern = f"{out_a}|{prefix_a},0.7;{out_b}|{prefix_b},0.3"
-    ds_cfg = MMapDatasetConfig(
+    ds_cfg = MegatronMMapDatasetConfig(
         max_target_length=seq_length,
         eod_id=eod_id,
         mmap_split_sentences=False,
@@ -818,10 +815,6 @@ class TestBlendAlignment:
     """
     from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
     from megatron.core.datasets.blended_dataset import BlendedDataset  # pylint: disable=import-outside-toplevel
-    from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
-        get_datasets,
-        pretrain_preprocessing_pipeline,
-    )
 
     eod_id = 0
     seq_length = 8
@@ -849,7 +842,7 @@ class TestBlendAlignment:
 
     # ---- MaxText side: full pipeline with mp_prefetch ----------------------
     blend_pattern = f"{out_a}|{prefix_a},0.7;{out_b}|{prefix_b},0.3"
-    ds_cfg = MMapDatasetConfig(
+    ds_cfg = MegatronMMapDatasetConfig(
         max_target_length=seq_length,
         eod_id=eod_id,
         mmap_split_sentences=False,
@@ -871,14 +864,14 @@ class TestBlendAlignment:
         dataset_config=ds_cfg,
     )
     cfg = SimpleNamespace(
-        grain_file_type="mmap_npy",
         mmap_eod_id=eod_id,
         tokenizer_path="",
         tokenizer_type="sentencepiece",
         add_bos=False,
         add_eos=False,
         hf_access_token="",
-        dataset_type="grain",
+        dataset_type="megatron_mmap",
+        megatron_mmap_mode="mmap_npy",
         max_target_length=seq_length,
         use_truncation=False,
         global_batch_size_to_load=batch_size,
@@ -886,6 +879,7 @@ class TestBlendAlignment:
         packing=False,
         grain_packing_type="concat_then_split",
         max_segments_per_seq=None,
+        packing_max_segments_per_sample=25,
         reset_attention_mask=False,
         grain_ram_budget_mb=256,
         eod_mask_loss=False,

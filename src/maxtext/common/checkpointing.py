@@ -62,6 +62,14 @@ PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointO
 EmergencyReplicatorCheckpointManager = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager
 
 
+_GRAIN_BACKED_DATASET_TYPES = frozenset(("grain", "megatron_mmap"))
+
+
+def _is_grain_backed_dataset_type(dataset_type: str | None) -> bool:
+  """Whether a dataset uses Grain's per-process iterator checkpoint format."""
+  return dataset_type in _GRAIN_BACKED_DATASET_TYPES
+
+
 class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
   """A CheckpointHandler that allows specifying process_index and process_count."""
 
@@ -429,7 +437,7 @@ def create_orbax_checkpoint_manager(
       )
   }
 
-  if dataset_type is not None and dataset_type == "grain":
+  if _is_grain_backed_dataset_type(dataset_type):
     item_names += ("iter",)
     item_handlers["iter"] = GrainCheckpointHandler()
 
@@ -860,7 +868,7 @@ def load_state_if_possible(
             dataset_type,
             data_iterator,
         ) if (
-            dataset_type == "grain"
+            _is_grain_backed_dataset_type(dataset_type)
             and data_iterator
             and not isinstance(data_iterator, PlaceHolderDataIterator)
             and (checkpoint_manager.directory / str(step) / "iter").exists()
@@ -1137,7 +1145,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   )
   save_args_composite = {"items": checkpoint_args}
 
-  if config and config.dataset_type == "grain" and not isinstance(data_iterator, PlaceHolderDataIterator):
+  if config and _is_grain_backed_dataset_type(config.dataset_type) and not isinstance(data_iterator, PlaceHolderDataIterator):
     if isinstance(data_iterator, RemoteIteratorWrapper):
       # Pass the wrapper directly; GrainCheckpointHandler will call save_state with the step
       save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator)

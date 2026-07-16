@@ -10,13 +10,15 @@ import numpy as np
 import pytest
 
 from maxtext.input_pipeline._mmap_datasource import (
-    MMapDatasetConfig,
+    MegatronMMapDatasetConfig,
     MegatronNpyDataSource,
     _discover_npy_indices,
     _resolve_bin_prefixes,
 )
 from tools.data_processing.mmap_index_builder import convert
 from tests.unit.mmap_test_utils import create_mmap_test_data
+from tests.unit.mmap_test_utils import get_megatron_mmap_dataset as get_datasets
+from tests.unit.mmap_test_utils import preprocess_megatron_mmap as pretrain_preprocessing_pipeline
 
 pytestmark = pytest.mark.cpu_only
 
@@ -387,8 +389,6 @@ class TestMmapNpyPipelineIntegration:
 
   def test_data_file_pattern_parsing(self, sample_dataset):
     """Verify the 'npy_dir|bin_dir' pattern creates a working dataset."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     pattern = f"{sample_dataset['npy_dir']}|{sample_dataset['bin_dir']}"
     dataset = get_datasets(
         data_file_pattern=pattern,
@@ -403,7 +403,7 @@ class TestMmapNpyPipelineIntegration:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(
+        dataset_config=MegatronMMapDatasetConfig(
             max_target_length=sample_dataset["seq_length"], eod_id=0, mmap_split_sentences=False
         ),
     )
@@ -412,8 +412,6 @@ class TestMmapNpyPipelineIntegration:
 
   def test_single_spec_returns_all_samples(self, sample_dataset):
     """Single spec without mixture returns correct number of samples."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     pattern = f"{sample_dataset['npy_dir']}|{sample_dataset['bin_dir']}"
     # Use num_samples=4 and seed=42 to match the fixture's 2-epoch npy build,
     # so that _ensure_npy_indices finds the cached index files (cache hit).
@@ -430,7 +428,7 @@ class TestMmapNpyPipelineIntegration:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(
+        dataset_config=MegatronMMapDatasetConfig(
             max_target_length=sample_dataset["seq_length"],
             eod_id=0,
             mmap_split_sentences=False,
@@ -450,8 +448,6 @@ class TestMmapNpyPipelineIntegration:
 
   def test_num_samples_none_auto_builds_1_epoch(self, sample_dataset):
     """When num_samples=None, auto-build 1-epoch npy indices (Megatron alignment)."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     pattern = f"{sample_dataset['npy_dir']}|{sample_dataset['bin_dir']}"
     dataset = get_datasets(
         data_file_pattern=pattern,
@@ -466,7 +462,7 @@ class TestMmapNpyPipelineIntegration:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(
+        dataset_config=MegatronMMapDatasetConfig(
             max_target_length=sample_dataset["seq_length"], eod_id=0, mmap_split_sentences=False
         ),
     )
@@ -478,8 +474,6 @@ class TestMmapNpyPipelineIntegration:
 
   def test_explicit_prefix_spec(self, sample_dataset):
     """Spec can use an explicit .bin prefix instead of a directory."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     pattern = f"{sample_dataset['npy_dir']}|{sample_dataset['prefix']}"
     dataset = get_datasets(
         data_file_pattern=pattern,
@@ -494,7 +488,7 @@ class TestMmapNpyPipelineIntegration:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(
+        dataset_config=MegatronMMapDatasetConfig(
             max_target_length=sample_dataset["seq_length"], eod_id=0, mmap_split_sentences=False
         ),
     )
@@ -503,8 +497,6 @@ class TestMmapNpyPipelineIntegration:
 
   def test_malformed_spec_raises(self):
     """Spec missing the '|' separator raises ValueError."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     with pytest.raises(ValueError, match="mmap_npy spec must be"):
       get_datasets(
           data_file_pattern="no_pipe_here",
@@ -519,13 +511,11 @@ class TestMmapNpyPipelineIntegration:
           grain_num_threads=1,
           grain_prefetch_buffer_size=1,
           grain_data_source_max_workers=1,
-          dataset_config=MMapDatasetConfig(max_target_length=4, eod_id=0, mmap_split_sentences=False),
+          dataset_config=MegatronMMapDatasetConfig(max_target_length=4, eod_id=0, mmap_split_sentences=False),
       )
 
   def test_mixture_with_weights(self, sample_dataset):
     """Semicolon-separated mixture spec with weights works."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     spec = f"{sample_dataset['npy_dir']}|{sample_dataset['bin_dir']}"
     # Same dataset twice with equal weights
     pattern = f"{spec},0.5;{spec},0.5"
@@ -542,7 +532,7 @@ class TestMmapNpyPipelineIntegration:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(
+        dataset_config=MegatronMMapDatasetConfig(
             max_target_length=sample_dataset["seq_length"], eod_id=0, mmap_split_sentences=False
         ),
     )
@@ -551,8 +541,6 @@ class TestMmapNpyPipelineIntegration:
 
   def test_mixture_malformed_entry_raises(self, sample_dataset):
     """Mixture entry without a weight raises ValueError."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     spec = f"{sample_dataset['npy_dir']}|{sample_dataset['bin_dir']}"
     # Construct a malformed mixture: missing weight
     pattern_bad = f"{spec};{spec}"
@@ -570,15 +558,13 @@ class TestMmapNpyPipelineIntegration:
           grain_num_threads=1,
           grain_prefetch_buffer_size=1,
           grain_data_source_max_workers=1,
-          dataset_config=MMapDatasetConfig(
+          dataset_config=MegatronMMapDatasetConfig(
               max_target_length=sample_dataset["seq_length"], eod_id=0, mmap_split_sentences=False
           ),
       )
 
   def test_unsupported_file_type_error_includes_mmap_npy(self):
     """Error message for unsupported file types now mentions mmap_npy."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     with pytest.raises(ValueError, match="mmap_npy"):
       get_datasets(
           data_file_pattern="dummy",
@@ -631,10 +617,6 @@ class TestMegatronNpyFixedLengthOutput:
     ``ValueError: all input arrays must have the same shape`` at batch time.
     """
     from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
-    from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
-        get_datasets,
-        pretrain_preprocessing_pipeline,
-    )
 
     seq_length = sample_dataset["seq_length"]
     pattern = f"{sample_dataset['npy_dir']}|{sample_dataset['prefix']}"
@@ -651,17 +633,17 @@ class TestMegatronNpyFixedLengthOutput:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(max_target_length=seq_length, eod_id=0, mmap_split_sentences=False),
+        dataset_config=MegatronMMapDatasetConfig(max_target_length=seq_length, eod_id=0, mmap_split_sentences=False),
     )
     cfg = SimpleNamespace(
-        grain_file_type="mmap_npy",
         mmap_eod_id=0,
         tokenizer_path="",
         tokenizer_type="sentencepiece",
         add_bos=False,
         add_eos=False,
         hf_access_token="",
-        dataset_type="grain",
+        dataset_type="megatron_mmap",
+        megatron_mmap_mode="mmap_npy",
         max_target_length=seq_length,
         use_truncation=False,
         global_batch_size_to_load=4,
@@ -669,6 +651,7 @@ class TestMegatronNpyFixedLengthOutput:
         packing=False,
         grain_packing_type="concat_then_split",
         max_segments_per_seq=None,
+        packing_max_segments_per_sample=25,
         reset_attention_mask=False,
         grain_ram_budget_mb=256,
         eod_mask_loss=False,
@@ -706,10 +689,6 @@ class TestMegatronNpyFixedLengthOutput:
     — produces correct output shapes when multiprocessing is active.
     """
     from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
-    from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
-        get_datasets,
-        pretrain_preprocessing_pipeline,
-    )
 
     with tempfile.TemporaryDirectory() as tmp_dir:
       bin_dir = os.path.join(tmp_dir, "bin_dir")
@@ -742,17 +721,17 @@ class TestMegatronNpyFixedLengthOutput:
           grain_num_threads=1,
           grain_prefetch_buffer_size=1,
           grain_data_source_max_workers=1,
-          dataset_config=MMapDatasetConfig(max_target_length=seq_length, eod_id=0, mmap_split_sentences=False),
+          dataset_config=MegatronMMapDatasetConfig(max_target_length=seq_length, eod_id=0, mmap_split_sentences=False),
       )
       cfg = SimpleNamespace(
-          grain_file_type="mmap_npy",
           mmap_eod_id=0,
           tokenizer_path="",
           tokenizer_type="sentencepiece",
           add_bos=False,
           add_eos=False,
           hf_access_token="",
-          dataset_type="grain",
+          dataset_type="megatron_mmap",
+          megatron_mmap_mode="mmap_npy",
           max_target_length=seq_length,
           use_truncation=False,
           global_batch_size_to_load=4,
@@ -760,6 +739,7 @@ class TestMegatronNpyFixedLengthOutput:
           packing=False,
           grain_packing_type="concat_then_split",
           max_segments_per_seq=None,
+          packing_max_segments_per_sample=25,
           reset_attention_mask=False,
           grain_ram_budget_mb=256,
           eod_mask_loss=False,
@@ -798,10 +778,6 @@ class TestMegatronNpyFixedLengthOutput:
     and compares inputs/targets element-by-element.
     """
     from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
-    from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
-        get_datasets,
-        pretrain_preprocessing_pipeline,
-    )
 
     with tempfile.TemporaryDirectory() as tmp_dir:
       bin_dir = os.path.join(tmp_dir, "bin_dir")
@@ -820,14 +796,14 @@ class TestMegatronNpyFixedLengthOutput:
 
       pattern = f"{npy_dir}|{prefix}"
       cfg = SimpleNamespace(
-          grain_file_type="mmap_npy",
           mmap_eod_id=0,
           tokenizer_path="",
           tokenizer_type="sentencepiece",
           add_bos=False,
           add_eos=False,
           hf_access_token="",
-          dataset_type="grain",
+          dataset_type="megatron_mmap",
+          megatron_mmap_mode="mmap_npy",
           max_target_length=seq_length,
           use_truncation=False,
           global_batch_size_to_load=4,
@@ -835,6 +811,7 @@ class TestMegatronNpyFixedLengthOutput:
           packing=False,
           grain_packing_type="concat_then_split",
           max_segments_per_seq=None,
+          packing_max_segments_per_sample=25,
           reset_attention_mask=False,
           grain_ram_budget_mb=256,
           eod_mask_loss=False,
@@ -854,7 +831,7 @@ class TestMegatronNpyFixedLengthOutput:
             grain_num_threads=1,
             grain_prefetch_buffer_size=1,
             grain_data_source_max_workers=1,
-            dataset_config=MMapDatasetConfig(
+            dataset_config=MegatronMMapDatasetConfig(
                 max_target_length=seq_length,
                 eod_id=0,
                 mmap_split_sentences=False,

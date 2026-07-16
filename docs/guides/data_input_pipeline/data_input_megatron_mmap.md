@@ -14,14 +14,14 @@
  limitations under the License.
 -->
 
-# Megatron indexed datasets with Grain
+# Megatron indexed datasets
 
 MaxText can read text datasets produced by the Megatron-LM preprocessing
 pipeline. The source data is a pair of files with a common prefix:
 `<prefix>.bin`, which contains token IDs, and `<prefix>.idx`, which contains
 the sequence and document metadata.
 
-Use `dataset_type=grain` with `grain_file_type=mmap_npy` for the
+Use `dataset_type=megatron_mmap` with `megatron_mmap_mode=mmap_npy` for the
 Megatron-compatible GPT sample-order path. It builds or loads three NumPy
 indices that define document order, fixed-length sample boundaries, and sample
 order. The lower-level `mmap` mode can read the same data format, but does not
@@ -37,7 +37,7 @@ The `mmap_eod_id` setting must equal the token ID written by preprocessing.
 
 ## Train with one dataset
 
-For `mmap_npy`, `grain_train_files` has the following form:
+For `mmap_npy`, `megatron_train_files` has the following form:
 
 ```text
 <npy_index_dir>|<data_prefix>[:<another_data_prefix>...]
@@ -49,9 +49,9 @@ and `.bin` extensions; it can also be a directory containing multiple shards.
 
 ```sh
 python3 -m maxtext.trainers.pre_train.train \
-  dataset_type=grain \
-  grain_file_type=mmap_npy \
-  grain_train_files='/cache/wiki_indices|/data/wiki_text_document' \
+  dataset_type=megatron_mmap \
+  megatron_mmap_mode=mmap_npy \
+  megatron_train_files='/cache/wiki_indices|/data/wiki_text_document' \
   mmap_eod_id=2 \
   max_target_length=2048 \
   steps=1000
@@ -65,8 +65,8 @@ To split one source into train and evaluation documents, configure the same
 source for both inputs and set a Megatron-style split ratio:
 
 ```sh
-grain_train_files='/cache/wiki_indices|/data/wiki_text_document' \
-grain_eval_files='/cache/wiki_indices|/data/wiki_text_document' \
+megatron_train_files='/cache/wiki_indices|/data/wiki_text_document' \
+megatron_eval_files='/cache/wiki_indices|/data/wiki_text_document' \
 mmap_npy_split='99,1'
 ```
 
@@ -76,7 +76,7 @@ Each component has the single-dataset form followed by a weight; separate
 components with semicolons:
 
 ```text
-grain_train_files='/cache/wiki_indices|/data/wiki,0.7;/cache/code_indices|/data/code,0.3'
+megatron_train_files='/cache/wiki_indices|/data/wiki,0.7;/cache/code_indices|/data/code,0.3'
 ```
 
 The blend is constructed in global sample order and then sharded across hosts.
@@ -87,8 +87,8 @@ Set `blend_cache_dir` to cache generated blend indices. Alternatively,
 ## Important limitations
 
 - Multimodal Megatron indexed-dataset extensions are not supported.
-- `grain_use_elastic_iterator=true` is not supported with `mmap` or
-  `mmap_npy`.
+- `grain_use_elastic_iterator=true` is not supported with
+  `dataset_type=megatron_mmap`.
 - `mmap_npy` requires the cache directory to be writable when indices are not
   already present.
 - For correct `eod_mask_loss=false` behavior, use `mmap_npy`; the simpler

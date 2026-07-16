@@ -22,11 +22,13 @@ from maxtext.input_pipeline._mmap_datasource import (
     MMAP_INDEX_HEADER_SIZE,
     MMAP_INDEX_MAGIC,
     MMAP_INDEX_VERSION,
-    MMapDatasetConfig,
+    MegatronMMapDatasetConfig,
     MMapIndexedDataset,
     MMapIndexedDataSource,
 )
 from tests.unit.mmap_test_utils import create_mmap_test_data
+from tests.unit.mmap_test_utils import get_megatron_mmap_dataset as get_datasets
+from tests.unit.mmap_test_utils import preprocess_megatron_mmap as pretrain_preprocessing_pipeline
 
 pytestmark = pytest.mark.cpu_only
 
@@ -632,8 +634,6 @@ class TestMMapIndexedDataSourceSplitSentences:
 
   def test_get_datasets_mmap_split_sentences(self, multi_doc_dataset):
     """get_datasets with mmap_split_sentences=True uses document-level indexing."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     prefix, _, _ = multi_doc_dataset
     ds = get_datasets(
         data_file_pattern=prefix,
@@ -648,7 +648,7 @@ class TestMMapIndexedDataSourceSplitSentences:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=True),
+        dataset_config=MegatronMMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=True),
     )
     items = list(ds)
     assert len(items) == 3  # 3 documents, not 6 sequences
@@ -664,8 +664,6 @@ class TestMMapGrainPipeline:
 
   def test_get_datasets_mmap(self, simple_dataset):
     """get_datasets returns an iterable dataset for mmap type."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     prefix, seqs = simple_dataset
     ds = get_datasets(
         data_file_pattern=prefix,
@@ -680,7 +678,7 @@ class TestMMapGrainPipeline:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
+        dataset_config=MegatronMMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
     )
     items = []
     for item in ds:
@@ -691,8 +689,6 @@ class TestMMapGrainPipeline:
 
   def test_get_datasets_mmap_with_weights(self, tmp_dir):
     """Weighted mixture of two mmap datasets."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     seqs1 = [np.array([1, 2, 3], dtype=np.int32)]
     seqs2 = [np.array([4, 5, 6], dtype=np.int32)]
     p1 = create_mmap_test_data(os.path.join(tmp_dir, "ds1"), seqs1)
@@ -712,7 +708,7 @@ class TestMMapGrainPipeline:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
+        dataset_config=MegatronMMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
     )
     items = []
     for item in ds:
@@ -723,8 +719,6 @@ class TestMMapGrainPipeline:
 
   def test_shuffle_determinism(self, tmp_dir):
     """Same seed produces same order."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     seqs = [np.array([i], dtype=np.int32) for i in range(20)]
     prefix = create_mmap_test_data(os.path.join(tmp_dir, "det"), seqs)
 
@@ -742,7 +736,7 @@ class TestMMapGrainPipeline:
           grain_num_threads=1,
           grain_prefetch_buffer_size=1,
           grain_data_source_max_workers=1,
-          dataset_config=MMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
+          dataset_config=MegatronMMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
       )
       items = []
       for item in ds:
@@ -757,8 +751,6 @@ class TestMMapGrainPipeline:
 
   def test_multi_host_shard_no_overlap(self, tmp_dir):
     """Two hosts with shard 0/2 and 1/2 produce disjoint data."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     seqs = [np.array([i], dtype=np.int32) for i in range(10)]
     prefix = create_mmap_test_data(os.path.join(tmp_dir, "shard"), seqs)
 
@@ -776,7 +768,7 @@ class TestMMapGrainPipeline:
           grain_num_threads=1,
           grain_prefetch_buffer_size=1,
           grain_data_source_max_workers=1,
-          dataset_config=MMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
+          dataset_config=MegatronMMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
       )
       return [item["text"][0] for item in ds]
 
@@ -789,8 +781,6 @@ class TestMMapGrainPipeline:
 
   def test_num_epoch_repeats(self, tmp_dir):
     """num_epoch=2 yields twice the data."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     seqs = [np.array([i], dtype=np.int32) for i in range(5)]
     prefix = create_mmap_test_data(os.path.join(tmp_dir, "epoch"), seqs)
 
@@ -807,15 +797,13 @@ class TestMMapGrainPipeline:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
+        dataset_config=MegatronMMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
     )
     items = list(ds)
     assert len(items) == 10
 
   def test_mixture_missing_weight_raises(self, tmp_dir):
     """Malformed mixture pattern (missing weight) raises ValueError."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     seqs = [np.array([1], dtype=np.int32)]
     p1 = create_mmap_test_data(os.path.join(tmp_dir, "m1"), seqs)
 
@@ -833,13 +821,11 @@ class TestMMapGrainPipeline:
           grain_num_threads=1,
           grain_prefetch_buffer_size=1,
           grain_data_source_max_workers=1,
-          dataset_config=MMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
+          dataset_config=MegatronMMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
       )
 
   def test_mixture_negative_weight_raises(self, tmp_dir):
     """Negative weight in mixture raises ValueError."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     seqs = [np.array([1], dtype=np.int32)]
     p1 = create_mmap_test_data(os.path.join(tmp_dir, "m2"), seqs)
     p2 = create_mmap_test_data(os.path.join(tmp_dir, "m3"), seqs)
@@ -858,13 +844,11 @@ class TestMMapGrainPipeline:
           grain_num_threads=1,
           grain_prefetch_buffer_size=1,
           grain_data_source_max_workers=1,
-          dataset_config=MMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
+          dataset_config=MegatronMMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
       )
 
   def test_mixture_zero_total_weight_raises(self, tmp_dir):
     """All-zero weights in mixture raises ValueError."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     seqs = [np.array([1], dtype=np.int32)]
     p1 = create_mmap_test_data(os.path.join(tmp_dir, "m4"), seqs)
     p2 = create_mmap_test_data(os.path.join(tmp_dir, "m5"), seqs)
@@ -883,13 +867,11 @@ class TestMMapGrainPipeline:
           grain_num_threads=1,
           grain_prefetch_buffer_size=1,
           grain_data_source_max_workers=1,
-          dataset_config=MMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
+          dataset_config=MegatronMMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
       )
 
   def test_mixture_invalid_weight_string_raises(self, tmp_dir):
     """Non-numeric weight string raises ValueError."""
-    from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel
-
     seqs = [np.array([1], dtype=np.int32)]
     p1 = create_mmap_test_data(os.path.join(tmp_dir, "m6"), seqs)
     p2 = create_mmap_test_data(os.path.join(tmp_dir, "m7"), seqs)
@@ -908,7 +890,7 @@ class TestMMapGrainPipeline:
           grain_num_threads=1,
           grain_prefetch_buffer_size=1,
           grain_data_source_max_workers=1,
-          dataset_config=MMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
+          dataset_config=MegatronMMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
       )
 
 
@@ -1074,7 +1056,7 @@ class TestMMapPipelineSemantics:
     # Rekey to match pipeline expectations
     from maxtext.input_pipeline import input_pipeline_utils  # pylint: disable=import-outside-toplevel
 
-    ds = ds.map(input_pipeline_utils.KeepFeatures(feature_names=["text"]))
+    ds = ds.map(input_pipeline_utils.KeepFeatures(feature_names=["text"], tokenize=False))
     rekey_dict = {"inputs": "text", "targets": "text"}
     ds = ds.map(input_pipeline_utils.Rekey(rekey_dict))
 
@@ -1118,29 +1100,10 @@ class TestMMapPipelineSemantics:
 # ===========================================================================
 
 
-class _FakeTokenizer:
-  """Minimal tokenizer stub for pipeline tests (avoids loading real models)."""
-
-  pad_id = 0
-  unk_id = 1
-  eos_id = 3
-
-
 class TestMMapPretrainPipeline:
   """End-to-end tests exercising pretrain_preprocessing_pipeline with mmap data,
   including split_sentences mode. These test the full path from
   get_datasets -> pretrain_preprocessing_pipeline -> batched output."""
-
-  @pytest.fixture(autouse=True)
-  def _mock_tokenizer(self, monkeypatch):
-    """Patch build_tokenizer to avoid loading real sentencepiece models."""
-    from maxtext.input_pipeline import grain_data_processing  # pylint: disable=import-outside-toplevel
-
-    monkeypatch.setattr(
-        grain_data_processing.tokenizer,
-        "build_tokenizer",
-        lambda *args, **kwargs: _FakeTokenizer(),
-    )
 
   @staticmethod
   def _make_config(
@@ -1155,14 +1118,14 @@ class TestMMapPretrainPipeline:
     import ml_collections  # pylint: disable=import-outside-toplevel
 
     config = ml_collections.ConfigDict()
-    config.grain_file_type = "mmap"
-    config.grain_train_files = prefix
+    config.megatron_mmap_mode = "mmap"
+    config.megatron_train_files = prefix
     config.tokenizer_path = "unused"
     config.tokenizer_type = "sentencepiece"
     config.add_bos = False
     config.add_eos = False
     config.hf_access_token = ""
-    config.dataset_type = "grain"
+    config.dataset_type = "megatron_mmap"
     config.tokenize_train_data = False
     config.train_data_columns = ["text"]
     config.max_target_length = max_target_length
@@ -1171,6 +1134,7 @@ class TestMMapPretrainPipeline:
     config.packing = packing
     config.grain_packing_type = "concat_then_split"
     config.max_segments_per_seq = None
+    config.packing_max_segments_per_sample = 25
     config.grain_ram_budget_mb = 256
     config.mmap_split_sentences = split_sentences
     config.use_truncation = False
@@ -1181,10 +1145,6 @@ class TestMMapPretrainPipeline:
 
   def test_no_packing_output_shape(self, tmp_dir):
     """Full pipeline without packing produces correctly shaped batches."""
-    from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
-        get_datasets,
-        pretrain_preprocessing_pipeline,
-    )
 
     max_len = 8
     batch_size = 2
@@ -1206,7 +1166,7 @@ class TestMMapPretrainPipeline:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=False),
+        dataset_config=MegatronMMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=False),
     )
     pipeline = pretrain_preprocessing_pipeline(
         ds,
@@ -1225,10 +1185,6 @@ class TestMMapPretrainPipeline:
 
   def test_packing_concat_then_split_output(self, tmp_dir):
     """Full pipeline with concat_then_split packing produces fixed-length packed samples."""
-    from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
-        get_datasets,
-        pretrain_preprocessing_pipeline,
-    )
 
     max_len = 8
     batch_size = 2
@@ -1256,7 +1212,7 @@ class TestMMapPretrainPipeline:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=False),
+        dataset_config=MegatronMMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=False),
     )
     pipeline = pretrain_preprocessing_pipeline(
         ds,
@@ -1276,10 +1232,6 @@ class TestMMapPretrainPipeline:
   def test_split_sentences_packing_end_to_end(self, tmp_dir):
     """Full pipeline with split_sentences=True + concat_then_split packing.
     Verifies that document-level shuffling feeds into packing correctly."""
-    from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
-        get_datasets,
-        pretrain_preprocessing_pipeline,
-    )
 
     max_len = 8
     batch_size = 2
@@ -1316,7 +1268,7 @@ class TestMMapPretrainPipeline:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=True),
+        dataset_config=MegatronMMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=True),
     )
     pipeline = pretrain_preprocessing_pipeline(
         ds,
@@ -1337,10 +1289,6 @@ class TestMMapPretrainPipeline:
     Verifies that the mmap path — which places mp_prefetch AFTER batch +
     ShiftData — produces correct output when multiprocessing is active.
     """
-    from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
-        get_datasets,
-        pretrain_preprocessing_pipeline,
-    )
 
     max_len = 8
     batch_size = 2
@@ -1362,7 +1310,7 @@ class TestMMapPretrainPipeline:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=False),
+        dataset_config=MegatronMMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=False),
     )
     pipeline = pretrain_preprocessing_pipeline(
         ds,
@@ -1382,10 +1330,6 @@ class TestMMapPretrainPipeline:
 
     Exercises the mmap path's mp_prefetch with document-level splitting.
     """
-    from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
-        get_datasets,
-        pretrain_preprocessing_pipeline,
-    )
 
     max_len = 16
     batch_size = 2
@@ -1419,7 +1363,7 @@ class TestMMapPretrainPipeline:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=True),
+        dataset_config=MegatronMMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=True),
     )
     pipeline = pretrain_preprocessing_pipeline(
         ds,
@@ -1437,10 +1381,6 @@ class TestMMapPretrainPipeline:
   def test_split_sentences_no_packing_end_to_end(self, tmp_dir):
     """Full pipeline with split_sentences=True, no packing.
     Documents are padded/trimmed to max_target_length."""
-    from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
-        get_datasets,
-        pretrain_preprocessing_pipeline,
-    )
 
     max_len = 16
     batch_size = 2
@@ -1474,7 +1414,7 @@ class TestMMapPretrainPipeline:
         grain_num_threads=1,
         grain_prefetch_buffer_size=1,
         grain_data_source_max_workers=1,
-        dataset_config=MMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=True),
+        dataset_config=MegatronMMapDatasetConfig(max_target_length=max_len, eod_id=0, mmap_split_sentences=True),
     )
     pipeline = pretrain_preprocessing_pipeline(
         ds,
