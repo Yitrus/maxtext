@@ -1035,7 +1035,6 @@ def _merge_short_segments_np(
 
 @dataclasses.dataclass
 class GenerateDocSegmentIds(grain.MapTransform):
-  # Megatron 数据迁移：文档边界位置编码
   """Generate segmentation and position arrays from EOD tokens within samples.
 
   Detects EOD tokens (``eod_id``) within each sample and generates proper
@@ -1125,7 +1124,6 @@ class GenerateDocSegmentIds(grain.MapTransform):
 
 @dataclasses.dataclass
 class MegatronSplitInputsTargets(grain.MapTransform):
-  # Megatron 数据迁移：输入目标拆分与掩码对齐
   """Split seq_length+1 tokens into inputs/targets following Megatron-LM convention.
 
   Input:  ``{"text": tokens}`` where ``len(tokens) == seq_length + 1``

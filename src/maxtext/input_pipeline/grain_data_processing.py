@@ -215,7 +215,7 @@ def get_datasets(
     return dataset
   else:
     raise ValueError(
-        f"grain pipeline supports (arrayrecord, tfrecord, parquet) as grain_file_type, " f"but got {data_file_type}"
+        f"grain pipeline supports (arrayrecord, tfrecord, parquet) as grain_file_type, but got {data_file_type}"
     )
 
 
@@ -431,6 +431,7 @@ def make_grain_train_iterator(
   ), "Batch size should be divisible by number of global devices."
 
   pipeline_fn = _get_pipeline_fn(config)
+
   get_ds_fn = functools.partial(
       get_datasets,
       config.grain_train_files,
@@ -531,6 +532,7 @@ def make_grain_eval_iterator(
   ), "Batch size should be divisible by number of global devices."
 
   pipeline_fn = _get_pipeline_fn(config)
+
   get_ds_fn = functools.partial(
       get_datasets,
       config.grain_eval_files,
