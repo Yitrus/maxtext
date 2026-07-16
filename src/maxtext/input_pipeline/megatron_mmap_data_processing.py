@@ -108,7 +108,16 @@ def _get_dataset(
   raise ValueError(f"Unsupported megatron_mmap_mode: {mode}")
 
 
-def _preprocess(dataset, config, worker_count, per_worker_buffer_size, *, mode="mmap_npy"):
+def _preprocess(
+    dataset,
+    config,
+    worker_count,
+    per_worker_buffer_size,
+    *,
+    global_batch_size,
+    is_train,
+    mode="mmap_npy",
+):
   """Apply Megatron sample semantics, Grain workers, and local batching."""
   eod_id = config.mmap_eod_id
   if mode == "mmap_npy":
@@ -133,8 +142,8 @@ def _preprocess(dataset, config, worker_count, per_worker_buffer_size, *, mode="
   else:
     raise ValueError(f"Unsupported megatron_mmap_mode: {mode}")
 
-  batch_size = config.global_batch_size_to_load // jax.process_count()
-  if config.expansion_factor_real_data > 1:
+  batch_size = global_batch_size // jax.process_count()
+  if is_train and config.expansion_factor_real_data > 1:
     batch_size = int(batch_size // config.expansion_factor_real_data)
   batch_fn = functools.partial(
       grain.experimental.batch_and_pad,
@@ -151,7 +160,15 @@ def _preprocess(dataset, config, worker_count, per_worker_buffer_size, *, mode="
 
 
 def _make_iterator(
-    config, global_mesh, process_indices, get_ds_fn, preprocessing_fn, global_batch_size, generate_padding_batch
+    config,
+    global_mesh,
+    process_indices,
+    get_ds_fn,
+    preprocessing_fn,
+    global_batch_size,
+    generate_padding_batch,
+    *,
+    is_train,
 ):
   """Run this source through the Google branch's shared host lifecycle."""
   assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible by number of global devices."
@@ -169,7 +186,7 @@ def _make_iterator(
         elastic=False,
     )
 
-  if 0 < config.expansion_factor_real_data < 1:
+  if is_train and 0 < config.expansion_factor_real_data < 1:
     num_dataloaders = int(1 / config.expansion_factor_real_data)
     host_count = len(process_indices) * num_dataloaders
     host_index = process_indices.index(jax.process_index())
@@ -194,7 +211,7 @@ def _make_iterator(
       preprocessing_fn(dataset=dataset),
       global_mesh,
       generate_padding_batch,
-      expansion_loading_factor_for_grain=config.expansion_factor_real_data,
+      expansion_loading_factor_for_grain=config.expansion_factor_real_data if is_train else -1,
   )
 
 
@@ -221,6 +238,8 @@ def make_megatron_mmap_train_iterator(config: ml_collections.ConfigDict, global_
       config=config,
       worker_count=config.grain_worker_count,
       per_worker_buffer_size=config.grain_per_worker_buffer_size,
+      global_batch_size=config.global_batch_size_to_load,
+      is_train=True,
       mode=mode,
   )
   return _make_iterator(
@@ -231,6 +250,7 @@ def make_megatron_mmap_train_iterator(config: ml_collections.ConfigDict, global_
       preprocessing_fn,
       config.global_batch_size_to_load,
       config.generate_padding_batch_train,
+      is_train=True,
   )
 
 
@@ -254,6 +274,8 @@ def make_megatron_mmap_eval_iterator(config: ml_collections.ConfigDict, global_m
       config=config,
       worker_count=config.grain_worker_count_eval,
       per_worker_buffer_size=config.grain_per_worker_buffer_size_eval,
+      global_batch_size=config.global_batch_size_to_load_eval,
+      is_train=False,
       mode=mode,
   )
   return _make_iterator(
@@ -264,4 +286,5 @@ def make_megatron_mmap_eval_iterator(config: ml_collections.ConfigDict, global_m
       preprocessing_fn,
       config.global_batch_size_to_load_eval,
       config.generate_padding_batch_eval,
+      is_train=False,
   )

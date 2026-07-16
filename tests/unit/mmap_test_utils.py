@@ -58,6 +58,8 @@ def preprocess_megatron_mmap(dataset, config, data_columns, tokenize, grain_work
       config,
       worker_count=grain_worker_count,
       per_worker_buffer_size=grain_per_worker_buffer_size,
+      global_batch_size=config.global_batch_size_to_load,
+      is_train=True,
       mode=config.megatron_mmap_mode,
   )
 
