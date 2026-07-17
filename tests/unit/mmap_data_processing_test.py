@@ -1074,7 +1074,7 @@ class TestMMapPipelineSemantics:
     # Rekey to match pipeline expectations
     from maxtext.input_pipeline import input_pipeline_utils  # pylint: disable=import-outside-toplevel
 
-    ds = ds.map(input_pipeline_utils.KeepFeatures(feature_names=["text"]))
+    ds = ds.map(input_pipeline_utils.KeepFeatures(feature_names=["text"], tokenize=False))
     rekey_dict = {"inputs": "text", "targets": "text"}
     ds = ds.map(input_pipeline_utils.Rekey(rekey_dict))
 
