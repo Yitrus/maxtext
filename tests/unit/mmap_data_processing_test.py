@@ -1134,10 +1134,10 @@ class TestMMapPretrainPipeline:
   @pytest.fixture(autouse=True)
   def _mock_tokenizer(self, monkeypatch):
     """Patch build_tokenizer to avoid loading real sentencepiece models."""
-    from maxtext.input_pipeline import grain_data_processing  # pylint: disable=import-outside-toplevel
+    from maxtext.input_pipeline import data_processing_utils  # pylint: disable=import-outside-toplevel
 
     monkeypatch.setattr(
-        grain_data_processing.tokenizer,
+        data_processing_utils.tokenizer,
         "build_tokenizer",
         lambda *args, **kwargs: _FakeTokenizer(),
     )
