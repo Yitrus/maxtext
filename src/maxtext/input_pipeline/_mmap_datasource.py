@@ -528,6 +528,72 @@ class MultiShardMMapIndexedDataSource(grain.RandomAccessDataSource):
     )
 
 
+class MMapSampleIndexDataSource(grain.RandomAccessDataSource):
+  """Expose fixed-length windows over a concatenated MMap document stream.
+
+  ``mmap`` is the simple sequential format.  Unlike ``mmap_npy``, it does
+  not reproduce Megatron's document/sample/shuffle index ordering; it only
+  provides fixed-length windows for the existing Grain pipeline.  The input
+  must already contain EOD tokens when document-boundary semantics matter.
+  """
+
+  def __init__(self, inner_source, seq_length: int, eod_id: int, drop_last: bool = True):
+    if seq_length <= 0:
+      raise ValueError(f"seq_length must be positive, got {seq_length}")
+    self._inner_source = inner_source
+    self._seq_length = seq_length
+    self._eod_id = eod_id
+    self._drop_last = drop_last
+    self._cumulative_tokens = np.cumsum(inner_source.doc_token_counts(), dtype=np.int64)
+    total_tokens = int(self._cumulative_tokens[-1]) if len(self._cumulative_tokens) else 0
+    self._num_samples = (
+        total_tokens // seq_length
+        if drop_last
+        else (total_tokens + seq_length - 1) // seq_length
+    )
+    inner_source.check_eod_presence(eod_id, "mmap mode")
+
+  def __len__(self):
+    return self._num_samples
+
+  def __getitem__(self, idx):
+    if idx < 0:
+      idx += self._num_samples
+    if idx < 0 or idx >= self._num_samples:
+      raise IndexError(f"Sample index {idx} out of range for dataset with {self._num_samples} samples")
+
+    result = np.full(self._seq_length, self._eod_id, dtype=np.int32)
+    global_offset = idx * self._seq_length
+    doc_idx = int(np.searchsorted(self._cumulative_tokens, global_offset, side="right"))
+    output_offset = 0
+
+    while output_offset < self._seq_length and doc_idx < len(self._cumulative_tokens):
+      doc_start = int(self._cumulative_tokens[doc_idx - 1]) if doc_idx else 0
+      offset_in_doc = global_offset - doc_start
+      doc_tokens = self._inner_source[doc_idx]["text"]
+      copy_length = min(len(doc_tokens) - offset_in_doc, self._seq_length - output_offset)
+      if copy_length > 0:
+        result[output_offset : output_offset + copy_length] = doc_tokens[
+            offset_in_doc : offset_in_doc + copy_length
+        ]
+        output_offset += copy_length
+        global_offset += copy_length
+      doc_idx += 1
+
+    return {"text": result}
+
+  def __getstate__(self):
+    return {
+        "inner_source": self._inner_source,
+        "seq_length": self._seq_length,
+        "eod_id": self._eod_id,
+        "drop_last": self._drop_last,
+    }
+
+  def __setstate__(self, state):
+    self.__init__(**state)
+
+
 def _resolve_bin_prefixes(bin_paths):
   """Resolve one or more bin paths into sorted MMap dataset prefixes.
 
@@ -934,6 +1000,64 @@ def _parse_mmap_npy_spec(spec):
   npy_dir = parts[0].strip()
   bin_paths = [p.strip() for p in parts[1].split(":")]
   return npy_dir, bin_paths
+
+
+def create_mmap_source(path_prefix, split_sentences, seq_length, eod_id):
+  """Create a Grain map dataset for a simple MMap path or shard directory."""
+  prefixes = _resolve_bin_prefixes(path_prefix.strip())
+  if len(prefixes) == 1:
+    source = MMapIndexedDataSource(prefixes[0], split_sentences=split_sentences)
+  else:
+    source = MultiShardMMapIndexedDataSource(prefixes, split_sentences=split_sentences)
+  if seq_length and eod_id is not None:
+    source = MMapSampleIndexDataSource(source, seq_length=seq_length, eod_id=eod_id)
+  return grain.MapDataset.source(source)
+
+
+def get_mmap_dataset(
+    data_file_pattern,
+    split_sentences,
+    seq_length,
+    eod_id,
+    shuffle,
+    shuffle_seed,
+    num_epoch,
+    host_index,
+    host_count,
+    num_threads,
+    prefetch_buffer_size,
+    apply_transforms,
+):
+  """Build the simple ``mmap`` Grain pipeline, including weighted mixtures."""
+  if ";" in data_file_pattern:
+    prefixes, weights = _parse_weighted_mixture(data_file_pattern, "mmap")
+    datasets = [create_mmap_source(prefix, split_sentences, seq_length, eod_id) for prefix in prefixes]
+    iter_datasets = [
+        apply_transforms(
+            dataset,
+            shuffle,
+            shuffle_seed,
+            num_epoch,
+            host_index,
+            host_count,
+            num_threads,
+            prefetch_buffer_size,
+        )
+        for dataset in datasets
+    ]
+    return grain.IterDataset.mix(iter_datasets, weights)
+
+  dataset = create_mmap_source(data_file_pattern, split_sentences, seq_length, eod_id)
+  return apply_transforms(
+      dataset,
+      shuffle,
+      shuffle_seed,
+      num_epoch,
+      host_index,
+      host_count,
+      num_threads,
+      prefetch_buffer_size,
+  )
 
 
 def _ensure_npy_indices(
