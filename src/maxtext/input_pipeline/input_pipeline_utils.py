@@ -955,7 +955,7 @@ def shift_left(x, pad_id, axis=1):
 
 
 def shift_and_refine(x, ignored_ids, axis=1):
-  """Shift inputs, set segmentation to 0 when target element is in ignored_ids if provided"""
+  """Left-shift targets and mask labels equal to one of ``ignored_ids``."""
   x["targets"] = shift_left(x["targets"], ignored_ids[0], axis=axis)
   x["targets_segmentation"] = shift_left(x["targets_segmentation"], 0, axis=axis)
   for ignore_id in ignored_ids:
@@ -966,7 +966,16 @@ def shift_and_refine(x, ignored_ids, axis=1):
 
 @dataclasses.dataclass
 class ShiftData(grain.MapTransform):
-  """Shift inputs and refine annotations."""
+  """Convert copied token sequences into next-token targets after batching.
+
+  ``targets`` and ``targets_segmentation`` are shifted one position to the
+  left along ``axis``. The final target is padded with ``ignored_ids[0]`` and
+  receives segmentation value zero. Any shifted target equal to an ignored ID
+  also receives segmentation value zero, excluding it from loss computation.
+
+  This transform intentionally leaves positions unchanged: input and target
+  positions refer to the same prediction positions after the left shift.
+  """
 
   def __init__(self, ignored_ids, axis=1):
     self.ignored_ids = ignored_ids
@@ -977,11 +986,11 @@ class ShiftData(grain.MapTransform):
 
 
 def megatron_min_segment_length(config) -> int:
-  """Return Megatron's short-segment merge threshold for *config*.
+  """Return the Megatron-compatible short-segment merge threshold.
 
-  Megatron's ``_build_packed_seq_params`` uses ``seq_len // N`` (with ``N``
-  controlled by ``packing_max_segments_per_sample``) and only applies it when
-  the attention mask is reset per document.
+  The threshold is ``max_target_length // packing_max_segments_per_sample``.
+  It is meaningful only when attention resets at document boundaries; a
+  non-positive divisor disables merging.
   """
   if not config.reset_attention_mask:
     return 0
@@ -996,17 +1005,18 @@ def _merge_short_segments_np(
     position: np.ndarray,
     min_seg_len: int,
 ) -> None:
-  """Merge segments shorter than *min_seg_len* (greedy forward scan, in-place).
+  """Greedily merge short EOD-derived segments in place.
 
-  Matches Megatron ``_build_packed_seq_params``: a boundary is kept only when
-  the distance from the last kept boundary is ``>= min_seg_len``.  When a
-  boundary is dropped, the short segment is absorbed into the preceding one --
-  its tokens continue the previous segment's ID and position counter.
+  This follows Megatron's packed-sequence boundary rule. A candidate boundary
+  is retained only when it is strictly more than ``min_seg_len`` tokens after
+  the previous retained boundary. Dropped boundaries merge their tokens into
+  the preceding retained segment, with segment IDs and position IDs rebuilt
+  as a single contiguous sequence.
 
   Args:
-    segmentation: ``[seq_len]`` segment IDs (1-indexed).
-    position:     ``[seq_len]`` per-document position IDs.
-    min_seg_len:  Minimum token count for a segment to survive as independent.
+    segmentation: One-dimensional, one-indexed segment IDs.
+    position: One-dimensional position IDs corresponding to ``segmentation``.
+    min_seg_len: Boundary-merging threshold. Values of zero or one are no-ops.
   """
   seq_len = len(segmentation)
   if min_seg_len <= 1 or seq_len == 0:
@@ -1035,18 +1045,17 @@ def _merge_short_segments_np(
 
 @dataclasses.dataclass
 class GenerateDocSegmentIds(grain.MapTransform):
-  # Megatron 数据迁移：文档边界位置编码
-  """Generate segmentation and position arrays from EOD tokens within samples.
+  """Generate EOD-aware segmentation and position arrays for ``mmap`` samples.
 
-  Detects EOD tokens (``eod_id``) within each sample and generates proper
-  ``_segmentation`` and ``_position`` arrays.
-
-  This is used with ``MMapSampleIndexDataSource`` which inserts EOD tokens
-  between concatenated documents.
+  The input data must already contain document-ending EOD tokens, normally
+  from Megatron preprocessing with ``--append-eod``. ``MMapSampleIndexDataSource``
+  concatenates and windows those tokens; it does not insert EOD tokens itself.
+  For every input token field, this transform adds ``<field>_segmentation``
+  and ``<field>_position``.
 
   Args:
     eod_id: Token ID that marks the end of a document.
-    reset_attention_mask: Controls how document boundaries affect attention.
+    reset_attention_mask: Controls document-boundary attention and positions.
 
       * ``True`` (default) -- attention resets at every document boundary.
         EOD belongs to the preceding document (same segment ID), and a new
@@ -1059,20 +1068,16 @@ class GenerateDocSegmentIds(grain.MapTransform):
             segmentation:  [ 1   1   1   1   2   2   2   3   3   3   3   3]
             positions:     [ 0   1   2   3   0   1   2   0   1   2   3   4]
 
-      * ``False`` -- cross-document attention is allowed.  All non-EOD
-        tokens share the same segment ID (``1``), and positions are a
-        continuous ``arange`` over the whole sequence.
+      * ``False`` -- cross-document attention is allowed. Positions are a
+        continuous ``arange`` over the full sample, and all tokens use
+        segment ID ``1`` except masked EOD positions.
 
-        ::
-
-            tokens:        [tok tok tok EOD tok tok EOD tok tok tok tok tok]
-            segmentation:  [ 1   1   1   0   1   1   0   1   1   1   1   1]  (eod_mask_loss=True)
-            segmentation:  [ 1   1   1   1   1   1   1   1   1   1   1   1]  (eod_mask_loss=False)
-            positions:     [ 0   1   2   3   4   5   6   7   8   9  10  11]
-
-    eod_mask_loss: When True, EOD tokens get segmentation=0 (excluded from loss).
-      When False (default), EOD tokens get segmentation=1 (included in loss).
-      Only applies when reset_attention_mask=False.
+    eod_mask_loss: When ``reset_attention_mask`` is False, controls whether
+      EOD tokens receive segmentation value zero and are excluded from loss.
+      In the ``mmap`` pipeline, ``ShiftData`` subsequently masks shifted EOD
+      labels because EOD is also the batch padding sentinel.
+    min_segment_length: Optional threshold used to merge adjacent short
+      EOD-derived segments when attention resets are enabled.
   """
 
   def __init__(
@@ -1125,19 +1130,18 @@ class GenerateDocSegmentIds(grain.MapTransform):
 
 @dataclasses.dataclass
 class MegatronSplitInputsTargets(grain.MapTransform):
-  # Megatron 数据迁移：输入目标拆分与掩码对齐
-  """Split seq_length+1 tokens into inputs/targets following Megatron-LM convention.
+  """Build Megatron-compatible pretraining fields from an ``L + 1`` sample.
 
-  Input:  ``{"text": tokens}`` where ``len(tokens) == seq_length + 1``
-  Output: ``{"inputs": tokens[:-1], "targets": tokens[1:],
-            "inputs_segmentation": ..., "targets_segmentation": ...,
-            "inputs_position": ..., "targets_position": ...}``
+  Input is ``{"text": tokens}``, where ``len(tokens) == L + 1``. The output
+  contains length-``L`` fields with ``inputs = tokens[:-1]`` and
+  ``targets = tokens[1:]``. Unlike a padded left-shift, this preserves the
+  final real target and its loss contribution.
 
   This gives valid prediction targets at every position without padding,
   unlike the ShiftData approach which wastes the last position.
 
-  The three output array groups are constructed independently to match
-  Megatron-LM's separate attention_mask / loss_mask / position_ids:
+  Attention, loss, and position annotations are constructed independently to
+  match Megatron's separate attention-mask, loss-mask, and position-ID rules:
 
   - ``inputs_segmentation`` (attention): controlled by ``reset_attention_mask``.
     When True, EOD belongs to its preceding document (same segment ID) and
@@ -1150,13 +1154,17 @@ class MegatronSplitInputsTargets(grain.MapTransform):
     resets to 0 after EOD; when False, positions are sequential.
 
   Args:
-    eod_id: Token ID that marks the end of a document.
-    reset_attention_mask: Controls how document boundaries affect attention
-      and position encoding. When True, attention is blocked across
-      document boundaries and position IDs reset after each EOD token.
-    eod_mask_loss: When True, positions where inputs contain EOD get
-      targets_segmentation=0 (excluded from loss). When False (default),
-      all positions participate in loss.
+    eod_id: Token ID marking the end of a document.
+    reset_attention_mask: When True, EOD ends the current attention segment
+      and positions restart at zero for the following token.
+    eod_mask_loss: When True, positions whose input token is EOD have loss
+      mask zero.
+    no_attnmask_dataset_ids: Optional dataset IDs for samples that disable
+      attention-mask reset regardless of the global setting.
+    min_segment_length: Optional threshold for merging short EOD-derived
+      attention segments.
+    emit_dataset_id: Whether to emit a per-token ``dataset_id`` field when
+      the source sample provides one.
   """
 
   def __init__(

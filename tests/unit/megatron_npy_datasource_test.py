@@ -5,6 +5,7 @@
 import os
 import pickle
 import tempfile
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -12,7 +13,9 @@ import pytest
 from maxtext.input_pipeline._mmap_datasource import (
     MMapDatasetConfig,
     MegatronNpyDataSource,
+    create_mmap_npy_source,
     _discover_npy_indices,
+    _ensure_npy_indices,
     _resolve_bin_prefixes,
 )
 from tools.data_processing.mmap_index_builder import convert
@@ -375,6 +378,135 @@ class TestMegatronNpyDataSourcePickle:
     # Verify all items match
     for i, original in enumerate(ds):
       np.testing.assert_array_equal(ds2[i]["text"], original["text"])
+
+
+class TestMmapNpyIndexCache:
+  """Exercise the runtime cache-miss path used before Grain workers start."""
+
+  @staticmethod
+  def _create_eod_dataset(tmp_dir):
+    prefix = os.path.join(tmp_dir, "data")
+    create_mmap_test_data(
+        prefix,
+        [
+            np.array([10, 11, 12, 0], dtype=np.int32),
+            np.array([20, 21, 22, 23, 0], dtype=np.int32),
+            np.array([30, 31, 32, 33, 34, 0], dtype=np.int32),
+        ],
+        doc_boundaries=[0, 1, 2, 3],
+    )
+    return prefix
+
+  def test_cache_miss_prebuilt_indices_survive_pickle(self, tmp_dir):
+    """A worker can use cache-miss indices even before it observes the cache files."""
+    prefix = self._create_eod_dataset(tmp_dir)
+    npy_dir = os.path.join(tmp_dir, "indices")
+    with mock.patch("maxtext.input_pipeline._mmap_index_utils.is_primary_process", return_value=True):
+      expected_hash, prebuilt = _ensure_npy_indices(
+          npy_dir,
+          [prefix],
+          num_samples=4,
+          seq_length=4,
+          seed=42,
+      )
+
+    assert prebuilt is not None
+    disk_source = MegatronNpyDataSource(
+        npy_dir=npy_dir,
+        bin_paths=prefix,
+        eod_id=0,
+        seq_length=4,
+        expected_hash=expected_hash,
+    )
+    restored_memory_source = pickle.loads(
+        pickle.dumps(
+            MegatronNpyDataSource(
+                npy_dir=npy_dir,
+                bin_paths=prefix,
+                eod_id=0,
+                seq_length=4,
+                expected_hash=expected_hash,
+                prebuilt_indices=prebuilt,
+            )
+        )
+    )
+    assert len(restored_memory_source) == len(disk_source)
+    for index in range(len(disk_source)):
+      np.testing.assert_array_equal(restored_memory_source[index]["text"], disk_source[index]["text"])
+
+  def test_cache_key_reuses_an_epoch_bucket(self, tmp_dir):
+    """Different requested sizes share an index triplet when epochs are unchanged."""
+    prefix = self._create_eod_dataset(tmp_dir)
+    npy_dir = os.path.join(tmp_dir, "indices")
+    with mock.patch("maxtext.input_pipeline._mmap_index_utils.is_primary_process", return_value=True):
+      first_hash, first_prebuilt = _ensure_npy_indices(
+          npy_dir,
+          [prefix],
+          num_samples=3,
+          seq_length=4,
+          seed=42,
+      )
+      same_bucket_hash, same_bucket_prebuilt = _ensure_npy_indices(
+          npy_dir,
+          [prefix],
+          num_samples=2,
+          seq_length=4,
+          seed=42,
+      )
+      next_bucket_hash, next_bucket_prebuilt = _ensure_npy_indices(
+          npy_dir,
+          [prefix],
+          num_samples=4,
+          seq_length=4,
+          seed=42,
+      )
+
+    assert first_prebuilt is not None
+    assert first_hash == same_bucket_hash
+    assert same_bucket_prebuilt is None
+    assert next_bucket_hash != first_hash
+    assert next_bucket_prebuilt is not None
+
+  def test_runtime_split_matches_offline_conversion(self, tmp_dir):
+    """Runtime split auto-build must consume the same document partition as ``convert``."""
+    prefix = os.path.join(tmp_dir, "data")
+    sequences = []
+    for document_id in range(20):
+      tokens = np.arange(document_id * 16 + 1, document_id * 16 + 17, dtype=np.int32)
+      tokens[-1] = 0
+      sequences.append(tokens)
+    create_mmap_test_data(prefix, sequences, doc_boundaries=list(range(21)))
+
+    for split_index in (0, 1):
+      offline_dir = os.path.join(tmp_dir, f"offline_{split_index}")
+      convert(
+          [prefix],
+          offline_dir,
+          seq_length=8,
+          num_epochs=1,
+          seed=42,
+          split="0.9,0.1",
+          split_index=split_index,
+      )
+      offline = MegatronNpyDataSource(
+          npy_dir=offline_dir,
+          bin_paths=prefix,
+          eod_id=0,
+          seq_length=8,
+      )
+      runtime = create_mmap_npy_source(
+          f"{os.path.join(tmp_dir, f'runtime_{split_index}')}|{prefix}",
+          eod_id=0,
+          seq_length=8,
+          split_sentences=False,
+          seed=42,
+          split="0.9,0.1",
+          split_index=split_index,
+      )
+
+      assert len(runtime) == len(offline)
+      for index in range(len(offline)):
+        np.testing.assert_array_equal(runtime[index]["text"], offline[index]["text"])
 
 
 # ===========================================================================

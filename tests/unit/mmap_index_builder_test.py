@@ -15,9 +15,11 @@ from tools.data_processing.mmap_index_builder import (
     build_sample_index,
     build_shuffle_index,
     convert,
+    convert_blend,
     discover_shards,
     get_document_sizes,
 )
+from maxtext.input_pipeline._megatron_blending import MegatronBlendedDataSource
 from tests.unit.mmap_test_utils import create_mmap_test_data
 from maxtext.input_pipeline._mmap_datasource import _discover_npy_indices
 
@@ -359,6 +361,129 @@ class TestConvert:
     paths = convert([data_dir], out_dir, seq_length=3, num_samples=2, seed=42)
     for p in paths.values():
       assert os.path.isfile(p)
+
+
+# ===========================================================================
+# End-to-end tests: blend offline output and runtime loading
+# ===========================================================================
+
+
+class TestBlendIndexOutput:
+  """The blend command must emit the exact ``blend_index_dir`` protocol."""
+
+  def _create_input(self, tmp_dir, name, offset):
+    prefix = os.path.join(tmp_dir, name)
+    create_mmap_test_data(
+        prefix,
+        [np.arange(offset + 32 * i, offset + 32 * (i + 1), dtype=np.int32) for i in range(8)],
+        doc_boundaries=list(range(9)),
+    )
+    return prefix
+
+  def test_convert_blend_writes_runtime_dispatch_pair(self, tmp_dir):
+    """Offline blend output is consumable verbatim through ``blend_index_dir``."""
+    prefix_a = self._create_input(tmp_dir, "source_a", 100)
+    prefix_b = self._create_input(tmp_dir, "source_b", 1000)
+    output_dir = os.path.join(tmp_dir, "blend_indices")
+    total_samples = 12
+
+    results = convert_blend(
+        dataset_specs=[
+            {"input": [prefix_a], "weight": 0.7, "output_dir": os.path.join(output_dir, "dataset_0")},
+            {"input": [prefix_b], "weight": 0.3, "output_dir": os.path.join(output_dir, "dataset_1")},
+        ],
+        total_samples=total_samples,
+        seq_length=8,
+        seed=42,
+        max_workers=1,
+        blend_index_output_dir=output_dir,
+    )
+    expected_dataset_index = np.load(os.path.join(output_dir, "dataset_index.npy"))
+    expected_sample_index = np.load(os.path.join(output_dir, "dataset_sample_index.npy"))
+    assert expected_dataset_index.shape == (total_samples,)
+    assert expected_sample_index.shape == (total_samples,)
+
+    lengths = [np.load(result["paths"]["sample_index"]).shape[0] - 1 for result in results]
+    source = MegatronBlendedDataSource(
+        map_datasets=[list(range(length)) for length in lengths],
+        weights=[result["weight"] for result in results],
+        size=total_samples,
+        dataset_lengths=lengths,
+        blend_index_dir=output_dir,
+    )
+    np.testing.assert_array_equal(source._dataset_index, expected_dataset_index)  # pylint: disable=protected-access
+    np.testing.assert_array_equal(source._dataset_sample_index, expected_sample_index)  # pylint: disable=protected-access
+
+  def test_size_is_pinned_and_zero_weight_lengths_are_filtered(self):
+    """A requested training size is exact, and zero weights retain aligned lengths."""
+    pinned_source = MegatronBlendedDataSource(
+        map_datasets=[list(range(20)), list(range(20)), list(range(20))],
+        weights=[0.5, 0.3, 0.2],
+        dataset_lengths=[20, 20, 20],
+        # Megatron's per-dataset ceil calculation totals 8 here.  MaxText's
+        # requested global training size intentionally remains 7.
+        size=7,
+    )
+    assert len(pinned_source) == 7
+
+    zero_filtered_source = MegatronBlendedDataSource(
+        map_datasets=[["dropped"], list(range(20))],
+        weights=[0.0, 1.0],
+        dataset_lengths=[1, 20],
+        size=7,
+    )
+    assert [zero_filtered_source[i] for i in range(len(zero_filtered_source))] == list(range(7))
+
+  def test_convert_blend_skips_a_zero_weight_input(self, tmp_dir):
+    """Offline building filters zero weight before it attempts child conversion."""
+    active_prefix = self._create_input(tmp_dir, "active", 200)
+    output_dir = os.path.join(tmp_dir, "blend_indices")
+    results = convert_blend(
+        dataset_specs=[
+            {
+                "input": [os.path.join(tmp_dir, "does_not_exist")],
+                "weight": 0.0,
+                "output_dir": os.path.join(output_dir, "zero"),
+            },
+            {"input": [active_prefix], "weight": 1.0, "output_dir": os.path.join(output_dir, "active")},
+        ],
+        total_samples=4,
+        seq_length=8,
+        seed=42,
+        max_workers=1,
+        blend_index_output_dir=output_dir,
+    )
+    assert len(results) == 1
+    np.testing.assert_array_equal(np.load(os.path.join(output_dir, "dataset_index.npy")), np.zeros(4, dtype=np.int16))
+
+  def test_invalid_prebuilt_pair_falls_back_to_a_valid_in_memory_pair(self, tmp_dir):
+    """Corrupt prebuilt indices are recoverable, rather than a training-start failure."""
+    np.save(os.path.join(tmp_dir, "dataset_index.npy"), np.array([0, 0, 0, 0], dtype=np.int16))
+    # In-range but non-contiguous: the stronger cache validation must reject it.
+    np.save(os.path.join(tmp_dir, "dataset_sample_index.npy"), np.array([0, 2, 1, 3], dtype=np.int64))
+
+    source = MegatronBlendedDataSource(
+        map_datasets=[list(range(10))],
+        weights=[1.0],
+        dataset_lengths=[10],
+        size=4,
+        blend_index_dir=tmp_dir,
+    )
+    np.testing.assert_array_equal(source._dataset_sample_index, np.arange(4))  # pylint: disable=protected-access
+
+  def test_cache_write_failure_keeps_the_in_memory_blend_usable(self, tmp_dir):
+    """A read-only or malformed cache location must not block training startup."""
+    cache_path = os.path.join(tmp_dir, "not_a_directory")
+    with open(cache_path, "w", encoding="utf-8") as writer:
+      writer.write("cache path intentionally occupied by a file")
+
+    source = MegatronBlendedDataSource(
+        map_datasets=[list(range(10))],
+        weights=[1.0],
+        size=4,
+        cache_dir=cache_path,
+    )
+    assert [source[i] for i in range(len(source))] == [0, 1, 2, 3]
 
 
 # ===========================================================================

@@ -369,6 +369,10 @@ def pretrain_preprocessing_pipeline(
 ):
   """Use grain pipeline to pre-process the dataset and return iterators for pretrain"""
   if config.grain_file_type in ("mmap", "mmap_npy"):
+    assert len(data_columns) == 1, (
+        f"grain_file_type={config.grain_file_type!r} requires exactly one pre-tokenized "
+        f"text column, got {data_columns}"
+    )
     return _mmap_pretrain_pipeline(dataset, config, data_columns[0], grain_worker_count, grain_per_worker_buffer_size)
 
   is_offline = getattr(config, "is_offline_distillation", False)
@@ -689,12 +693,21 @@ def make_grain_eval_iterator(
   ), "Batch size should be divisible by number of global devices."
 
   pipeline_fn = _get_pipeline_fn(config)
+  mmap_npy_eval_num_samples = None
+  if config.grain_file_type == "mmap_npy" and hasattr(config, "eval_steps") and config.eval_steps > 0:
+    eval_interval = getattr(config, "eval_interval", 0)
+    if eval_interval > 0 and hasattr(config, "steps") and config.steps > 0:
+      eval_rounds = -(-config.steps // eval_interval)
+    else:
+      eval_rounds = 1
+    mmap_npy_eval_num_samples = eval_rounds * config.eval_steps * config.global_batch_size_to_load
+
   dataset_config = _build_dataset_config(
       config,
-      num_samples=None,
+      num_samples=mmap_npy_eval_num_samples,
       seed=config.data_shuffle_seed,
       split_ratio=config.mmap_npy_split or None,
-      split_index=1,
+      split_index=1 if config.mmap_npy_split else 0,
   )
 
   get_ds_fn = functools.partial(

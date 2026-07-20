@@ -755,6 +755,7 @@ def convert_blend(
     split=None,
     split_index=0,
     add_extra_token=1,
+    blend_index_output_dir=None,
 ):
   """Precompute Megatron-LM index .npy files for a blended mixture.
 
@@ -775,6 +776,9 @@ def convert_blend(
       split: Comma-separated split ratios (e.g. '0.9,0.05,0.05').
       split_index: Index into the split ratios.
       add_extra_token: Extra token for next-token prediction (default 1).
+      blend_index_output_dir: If set, also write the fixed-name global blend
+        dispatch pair (``dataset_index.npy`` and ``dataset_sample_index.npy``)
+        accepted by ``MegatronBlendedDataSource(blend_index_dir=...)``.
 
   Returns:
       List of dicts, one per dataset, each containing:
@@ -787,10 +791,17 @@ def convert_blend(
   if not dataset_specs:
     raise ValueError("dataset_specs must be non-empty")
 
-  weights = [s["weight"] for s in dataset_specs]
-  total_weight = sum(weights)
-  if total_weight <= 0:
-    raise ValueError(f"Total weight must be positive, got {total_weight}")
+  raw_weights = np.asarray([s["weight"] for s in dataset_specs], dtype=np.float64)
+  if np.any(raw_weights < 0):
+    raise ValueError(f"Blend weights must be non-negative, got {raw_weights.tolist()}")
+  if raw_weights.sum() <= 0:
+    raise ValueError(f"Total weight must be positive, got {float(raw_weights.sum())}")
+  # Runtime parsing removes zero-weight entries before constructing either
+  # child sources or the global dispatcher. Do the same offline so a zero
+  # entry never tries to build a meaningless zero-sample child cache.
+  keep = raw_weights > 0
+  dataset_specs = [spec for spec, keep_spec in zip(dataset_specs, keep) if keep_spec]
+  weights = raw_weights[keep].tolist()
 
   # Normalize once, matching Megatron's BlendedMegatronDatasetBuilder.
   # Downstream _normalize_and_filter_weights does the second normalize
@@ -844,5 +855,25 @@ def convert_blend(
           "buffer_samples": buffer_per_ds[idx],
       }
       log.info("Dataset %d done: %s", idx, list(paths.values()))
+
+  if blend_index_output_dir:
+    # Import locally: _megatron_blending imports this module for shared atomic
+    # writes, while this offline-only path needs its dispatcher builder.
+    from maxtext.input_pipeline._megatron_blending import build_and_save_blend_indices  # pylint: disable=import-outside-toplevel
+
+    dataset_lengths = [
+        int(np.load(result["paths"]["sample_index"], allow_pickle=False, mmap_mode="r").shape[0] - 1)
+        for result in results
+    ]
+    blend_paths = build_and_save_blend_indices(
+        output_dir=blend_index_output_dir,
+        # Megatron normalizes mixture weights once while constructing child
+        # datasets and once again in its blended dataset.  The helper performs
+        # that second normalization, matching runtime construction exactly.
+        weights=norm_weights,
+        dataset_lengths=dataset_lengths,
+        size=total_samples,
+    )
+    log.info("Blend dispatch indices written: %s", list(blend_paths.values()))
 
   return results

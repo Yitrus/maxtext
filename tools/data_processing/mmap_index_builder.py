@@ -19,8 +19,6 @@ Usage::
         --seq-length 2048 --total-samples 1000000
 """
 
-# Megatron 数据迁移：离线索引构建命令
-
 import logging
 import os
 import sys
@@ -88,7 +86,12 @@ def _add_blend_args(parser):
       help="Semicolon-separated dataset specs: 'input_path,weight;input_path2,weight2;...'.",
   )
   parser.add_argument(
-      "--output-dir", required=True, help="Root directory for .npy output (sub-dirs created per dataset)."
+      "--output-dir",
+      required=True,
+      help=(
+          "Root directory for .npy output (sub-dirs created per dataset); also "
+          "contains dataset_index.npy and dataset_sample_index.npy for blend_index_dir."
+      ),
   )
   parser.add_argument("--seq-length", required=True, type=int, help="Sequence length.")
   parser.add_argument(
@@ -153,11 +156,14 @@ def _run_blend(args):
       split=args.split,
       split_index=args.split_index,
       add_extra_token=args.add_extra_token,
+      blend_index_output_dir=args.output_dir,
   )
   for i, r in enumerate(results):
     log.info("Dataset %d: buffer_samples=%d", i, r["buffer_samples"])
     for name, path in r["paths"].items():
       log.info("  %s -> %s", name, path)
+  log.info("Blend dispatch -> %s", os.path.join(args.output_dir, "dataset_index.npy"))
+  log.info("Blend dispatch -> %s", os.path.join(args.output_dir, "dataset_sample_index.npy"))
 
 
 def main():
