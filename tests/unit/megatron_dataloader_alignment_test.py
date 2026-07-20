@@ -73,6 +73,7 @@ class _StubTokenizer(MegatronLegacyTokenizer):
 
 def _create_eod_dataset(tmp_dir, num_docs=10, eod_id=0, seed=123):
   """Create a valid Megatron indexed dataset with pre-appended EOD tokens."""
+  os.makedirs(tmp_dir, exist_ok=True)
   rng = np.random.RandomState(seed)
   sequences = []
   for doc_id in range(num_docs):

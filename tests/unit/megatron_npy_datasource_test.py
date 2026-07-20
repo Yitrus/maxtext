@@ -397,8 +397,9 @@ class TestMmapNpyIndexCache:
     )
     return prefix
 
-  def test_cache_miss_prebuilt_indices_survive_pickle(self, tmp_dir):
+  def test_cache_miss_prebuilt_indices_survive_pickle(self, tmp_path):
     """A worker can use cache-miss indices even before it observes the cache files."""
+    tmp_dir = str(tmp_path)
     prefix = self._create_eod_dataset(tmp_dir)
     npy_dir = os.path.join(tmp_dir, "indices")
     with mock.patch("maxtext.input_pipeline._mmap_index_utils.is_primary_process", return_value=True):
@@ -434,8 +435,9 @@ class TestMmapNpyIndexCache:
     for index in range(len(disk_source)):
       np.testing.assert_array_equal(restored_memory_source[index]["text"], disk_source[index]["text"])
 
-  def test_cache_key_reuses_an_epoch_bucket(self, tmp_dir):
+  def test_cache_key_reuses_an_epoch_bucket(self, tmp_path):
     """Different requested sizes share an index triplet when epochs are unchanged."""
+    tmp_dir = str(tmp_path)
     prefix = self._create_eod_dataset(tmp_dir)
     npy_dir = os.path.join(tmp_dir, "indices")
     with mock.patch("maxtext.input_pipeline._mmap_index_utils.is_primary_process", return_value=True):
@@ -467,8 +469,9 @@ class TestMmapNpyIndexCache:
     assert next_bucket_hash != first_hash
     assert next_bucket_prebuilt is not None
 
-  def test_runtime_split_matches_offline_conversion(self, tmp_dir):
+  def test_runtime_split_matches_offline_conversion(self, tmp_path):
     """Runtime split auto-build must consume the same document partition as ``convert``."""
+    tmp_dir = str(tmp_path)
     prefix = os.path.join(tmp_dir, "data")
     sequences = []
     for document_id in range(20):
