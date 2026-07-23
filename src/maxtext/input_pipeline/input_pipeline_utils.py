@@ -172,7 +172,9 @@ def is_conversational(features, data_columns):
   for column in data_columns:
     messages = features[column]
     if isinstance(messages, datasets.Sequence):
-      if isinstance(messages.feature, dict) and "role" in messages.feature and "content" in messages.feature:  # pyrefly: ignore[missing-attribute]
+      if (
+          isinstance(messages.feature, dict) and "role" in messages.feature and "content" in messages.feature
+      ):  # pyrefly: ignore[missing-attribute]
         return True
 
   return False
@@ -840,11 +842,19 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         if isinstance(element[data_column], mm_utils.PreprocessorOutput):
           raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
 
-        element[f"{data_column}_segmentation"] = element[data_column] != self.pad_id  # pyrefly: ignore[unsupported-operation]
-        element[f"{data_column}_segmentation"] = element[f"{data_column}_segmentation"].astype(np.int32)  # pyrefly: ignore[missing-attribute]
-        element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)  # pyrefly: ignore[missing-attribute]
+        element[f"{data_column}_segmentation"] = (
+            element[data_column] != self.pad_id
+        )  # pyrefly: ignore[unsupported-operation]
+        element[f"{data_column}_segmentation"] = element[f"{data_column}_segmentation"].astype(
+            np.int32
+        )  # pyrefly: ignore[missing-attribute]
+        element[f"{data_column}_position"] = np.arange(
+            element[data_column].shape[0], dtype=np.int32
+        )  # pyrefly: ignore[missing-attribute]
         if self.add_true_length:
-          element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)  # pyrefly: ignore[missing-attribute]
+          element[f"{data_column}_true_length"] = np.array(
+              [element[data_column].shape[0]], dtype=np.int32
+          )  # pyrefly: ignore[missing-attribute]
 
     for key, _ in element.items():
       if key == "images":
@@ -996,17 +1006,18 @@ def _merge_short_segments_np(
     position: np.ndarray,
     min_seg_len: int,
 ) -> None:
-  """Merge segments shorter than *min_seg_len* (greedy forward scan, in-place).
+  """Greedily merge short EOD-derived segments in place.
 
-  Matches Megatron ``_build_packed_seq_params``: a boundary is kept only when
-  the distance from the last kept boundary is ``>= min_seg_len``.  When a
-  boundary is dropped, the short segment is absorbed into the preceding one --
-  its tokens continue the previous segment's ID and position counter.
+  This follows Megatron's packed-sequence boundary rule. A candidate boundary
+  is retained only when it is strictly more than ``min_seg_len`` tokens after
+  the previous retained boundary. Dropped boundaries merge their tokens into
+  the preceding retained segment, with segment IDs and position IDs rebuilt
+  as a single contiguous sequence.
 
   Args:
-    segmentation: ``[seq_len]`` segment IDs (1-indexed).
-    position:     ``[seq_len]`` per-document position IDs.
-    min_seg_len:  Minimum token count for a segment to survive as independent.
+    segmentation: One-dimensional, one-indexed segment IDs.
+    position: One-dimensional position IDs corresponding to ``segmentation``.
+    min_seg_len: Boundary-merging threshold. Values of zero or one are no-ops.
   """
   seq_len = len(segmentation)
   if min_seg_len <= 1 or seq_len == 0:
@@ -1035,17 +1046,17 @@ def _merge_short_segments_np(
 
 @dataclasses.dataclass
 class GenerateDocSegmentIds(grain.MapTransform):
-  """Generate segmentation and position arrays from EOD tokens within samples.
+  """Generate EOD-aware segmentation and position arrays for ``mmap`` samples.
 
-  Detects EOD tokens (``eod_id``) within each sample and generates proper
-  ``_segmentation`` and ``_position`` arrays.
-
-  This is used with ``MMapSampleIndexDataSource`` which inserts EOD tokens
-  between concatenated documents.
+  The input data must already contain document-ending EOD tokens, normally
+  from Megatron preprocessing with ``--append-eod``. ``MMapSampleIndexDataSource``
+  concatenates and windows those tokens; it does not insert EOD tokens itself.
+  For every input token field, this transform adds ``<field>_segmentation``
+  and ``<field>_position``.
 
   Args:
     eod_id: Token ID that marks the end of a document.
-    reset_attention_mask: Controls how document boundaries affect attention.
+    reset_attention_mask: Controls document-boundary attention and positions.
 
       * ``True`` (default) -- attention resets at every document boundary.
         EOD belongs to the preceding document (same segment ID), and a new
@@ -1058,20 +1069,16 @@ class GenerateDocSegmentIds(grain.MapTransform):
             segmentation:  [ 1   1   1   1   2   2   2   3   3   3   3   3]
             positions:     [ 0   1   2   3   0   1   2   0   1   2   3   4]
 
-      * ``False`` -- cross-document attention is allowed.  All non-EOD
-        tokens share the same segment ID (``1``), and positions are a
-        continuous ``arange`` over the whole sequence.
+      * ``False`` -- cross-document attention is allowed. Positions are a
+        continuous ``arange`` over the full sample, and all tokens use
+        segment ID ``1`` except masked EOD positions.
 
-        ::
-
-            tokens:        [tok tok tok EOD tok tok EOD tok tok tok tok tok]
-            segmentation:  [ 1   1   1   0   1   1   0   1   1   1   1   1]  (eod_mask_loss=True)
-            segmentation:  [ 1   1   1   1   1   1   1   1   1   1   1   1]  (eod_mask_loss=False)
-            positions:     [ 0   1   2   3   4   5   6   7   8   9  10  11]
-
-    eod_mask_loss: When True, EOD tokens get segmentation=0 (excluded from loss).
-      When False (default), EOD tokens get segmentation=1 (included in loss).
-      Only applies when reset_attention_mask=False.
+    eod_mask_loss: When ``reset_attention_mask`` is False, controls whether
+      EOD tokens receive segmentation value zero and are excluded from loss.
+      In the ``mmap`` pipeline, ``ShiftData`` subsequently masks shifted EOD
+      labels because EOD is also the batch padding sentinel.
+    min_segment_length: Optional threshold used to merge adjacent short
+      EOD-derived segments when attention resets are enabled.
   """
 
   def __init__(
@@ -1234,6 +1241,8 @@ class MegatronSplitInputsTargets(grain.MapTransform):
     if self.emit_dataset_id and "dataset_id" in element:
       result["dataset_id"] = np.full(seq_len, int(element["dataset_id"]), dtype=np.int32)
     return result
+
+
 @dataclasses.dataclass
 class ComputeQwen3OmniPositions(grain.MapTransform):
   """Computes 3D position IDs for Qwen3-Omni multimodal sequences.

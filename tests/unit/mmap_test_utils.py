@@ -1,7 +1,5 @@
 """Shared test utilities for MMap dataset tests."""
 
-# Megatron 数据迁移：.idx/.bin 测试数据构造
-
 import struct
 
 import numpy as np

@@ -27,13 +27,21 @@ indices that define document order, fixed-length sample boundaries, and sample
 order. The lower-level `mmap` mode can read the same data format, but does not
 provide the full Megatron document/sample shuffle compatibility guarantee.
 
+The compatibility guarantee assumes that the MaxText and Megatron jobs use the
+same `.bin`/`.idx` inputs, sequence length, EOD ID, random seed, split or blend
+recipe, and requested number of samples. The `mmap_npy` path reads
+`max_target_length + 1` raw tokens and emits a real next-token target at every
+one of the `max_target_length` model positions.
+
 ## Prepare the data
 
 Generate the input using a Megatron-compatible preprocessing command and add
 the end-of-document token during preprocessing. Do not add EOD tokens again in
 MaxText: doing so changes token offsets and invalidates the generated indices.
 
-The `mmap_eod_id` setting must equal the token ID written by preprocessing.
+The `mmap_eod_id` setting must equal the token ID written by preprocessing. Set
+`mmap_split_sentences=true` only when preprocessing used `--split-sentences`;
+the reader rejects a mismatched layout.
 
 ## Train with one dataset
 
@@ -54,12 +62,23 @@ python3 -m maxtext.trainers.pre_train.train \
   megatron_train_files='/cache/wiki_indices|/data/wiki_text_document' \
   mmap_eod_id=2 \
   max_target_length=2048 \
+  data_shuffle_seed=1234 \
+  reset_attention_mask=true \
+  eod_mask_loss=false \
+  packing_max_segments_per_sample=0 \
   steps=1000
 ```
 
 On a cache miss, every host deterministically builds the indices in memory;
 host 0 persists them using atomic writes for later runs. This does not require
-a cross-host barrier.
+a cross-host barrier. The training index contains
+`steps * global_batch_size_to_load` samples, so those values and
+`data_shuffle_seed` must match an offline build or reference Megatron job.
+
+`reset_attention_mask` and `eod_mask_loss` must match the reference job.
+Setting `packing_max_segments_per_sample` to a positive value deliberately
+merges short EOD-derived attention segments; set it to `0` to retain every EOD
+boundary for conventional Megatron GPT parity.
 
 To split one source into train and evaluation documents, configure the same
 source for both inputs and set a Megatron-style split ratio:
@@ -69,6 +88,26 @@ megatron_train_files='/cache/wiki_indices|/data/wiki_text_document' \
 megatron_eval_files='/cache/wiki_indices|/data/wiki_text_document' \
 mmap_npy_split='99,1'
 ```
+
+Training uses split 0 and evaluation uses split 1. When `eval_interval > 0`,
+`megatron_eval_files` is required. With no split, it can point to a separate
+evaluation dataset instead.
+
+## Use direct mmap mode
+
+The direct mode accepts a `.bin`/`.idx` common prefix or a directory of shards,
+without the `npy_index_dir|` prefix:
+
+```sh
+megatron_mmap_mode=mmap \
+megatron_train_files='/data/wiki_text_document'
+```
+
+It sequentially constructs fixed-length windows and can apply the standard
+Grain shuffle. A weighted direct-mode mixture uses
+`prefix,weight;another_prefix,weight`. It does not consume `mmap_npy_split`,
+`blend_cache_dir`, or `blend_index_dir`, and it does not promise Megatron
+document/sample or global blend ordering.
 
 ## Blend datasets
 
@@ -80,16 +119,55 @@ megatron_train_files='/cache/wiki_indices|/data/wiki,0.7;/cache/code_indices|/da
 ```
 
 The blend is constructed in global sample order and then sharded across hosts.
-Set `blend_cache_dir` to cache generated blend indices. Alternatively,
-`blend_index_dir` can point to a directory containing a prebuilt
-`dataset_index.npy` and `dataset_sample_index.npy` pair.
+Weights must be non-negative and have a positive total; zero-weight components
+are ignored. Set `blend_cache_dir` to cache the generated global dispatch
+indices. A cache-write failure falls back to the in-memory dispatch.
+Alternatively, `blend_index_dir` can point to a directory containing a
+prebuilt `dataset_index.npy` and `dataset_sample_index.npy` pair. The prebuilt
+pair takes precedence and must match the dataset order and requested size;
+invalid files are ignored and rebuilt.
+
+## Build indices before training
+
+Runtime index generation is sufficient for normal use. To avoid the first-job
+startup cost or publish indices into a read-only training environment, build a
+single dataset in advance. `--num-samples` must equal
+`steps * global_batch_size_to_load`:
+
+```sh
+python3 tools/data_processing/mmap_index_builder.py convert \
+  --input /data/wiki_text_document \
+  --output-dir /cache/wiki_indices \
+  --seq-length 2048 \
+  --num-samples 1024000 \
+  --seed 1234
+```
+
+For a blend, the command also writes the global dispatch pair:
+
+```sh
+python3 tools/data_processing/mmap_index_builder.py blend \
+  --datasets '/data/wiki_text_document,0.7;/data/code_text_document,0.3' \
+  --output-dir /cache/wiki_code_blend \
+  --seq-length 2048 \
+  --total-samples 1024000 \
+  --seed 1234
+```
+
+Consume both the generated child-index directories and the root dispatch
+directory:
+
+```sh
+megatron_train_files='/cache/wiki_code_blend/dataset_0|/data/wiki_text_document,0.7;/cache/wiki_code_blend/dataset_1|/data/code_text_document,0.3' \
+blend_index_dir='/cache/wiki_code_blend'
+```
 
 ## Important limitations
 
 - Multimodal Megatron indexed-dataset extensions are not supported.
 - `grain_use_elastic_iterator=true` is not supported with
   `dataset_type=megatron_mmap`.
-- `mmap_npy` requires the cache directory to be writable when indices are not
-  already present.
+- On a runtime index-cache miss, the `npy_index_dir` must be writable by host 0.
+  It may be read-only when the matching child indices were built in advance.
 - For correct `eod_mask_loss=false` behavior, use `mmap_npy`; the simpler
   `mmap` path uses EOD as the padding sentinel during shifting.

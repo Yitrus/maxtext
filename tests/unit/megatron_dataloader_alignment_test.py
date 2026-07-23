@@ -15,8 +15,6 @@ Coverage:
 Requires: torch (CPU), megatron-core.
 """
 
-# Megatron 数据迁移：逐元素对齐验证
-
 import os
 import tempfile
 

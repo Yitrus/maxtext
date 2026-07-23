@@ -861,8 +861,8 @@ def load_state_if_possible(
               restored,
               None,
           )
-        # Case 2: Matches if dataset type is "grain" and the data iterator is not a
-        # PlaceHolderDataIterator and a specific checkpoint file exists for the iterator
+        # Case 2: Matches Grain-backed dataset types when the data iterator is not a
+        # PlaceHolderDataIterator and a specific checkpoint file exists for the iterator.
         case (
             checkpoint_manager,
             dataset_type,
@@ -1145,7 +1145,11 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   )
   save_args_composite = {"items": checkpoint_args}
 
-  if config and _is_grain_backed_dataset_type(config.dataset_type) and not isinstance(data_iterator, PlaceHolderDataIterator):
+  if (
+      config
+      and _is_grain_backed_dataset_type(config.dataset_type)
+      and not isinstance(data_iterator, PlaceHolderDataIterator)
+  ):
     if isinstance(data_iterator, RemoteIteratorWrapper):
       # Pass the wrapper directly; GrainCheckpointHandler will call save_state with the step
       save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator)

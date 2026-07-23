@@ -4,12 +4,9 @@ This module provides random access to pre-tokenized datasets stored in
 Megatron-LM's memory-mapped format, integrated with Grain's data pipeline.
 """
 
-# Megatron 数据迁移：.idx/.bin 读取与样本数据源
-
 import bisect
 import dataclasses
 import glob as _glob
-import hashlib
 import logging
 import os
 import struct
@@ -532,123 +529,25 @@ class MultiShardMMapIndexedDataSource(grain.RandomAccessDataSource):
 
 
 class MMapSampleIndexDataSource(grain.RandomAccessDataSource):
-  """Fixed-length sample construction over a logically concatenated document stream.
+  """Expose fixed-length windows over a concatenated MMap document stream.
 
-  Wraps a document-level data source (``MMapIndexedDataSource`` or
-  ``MultiShardMMapIndexedDataSource``) and presents a view where each
-  element is a fixed-length window of ``seq_length`` tokens carved from
-  the concatenation of all documents.  The dataloader does **not** insert
-  EOD tokens — the dataset must be preprocessed with ``--append-eod`` so
-  that each document already ends with ``eod_id``.
-
-  This mirrors Megatron-LM's sample-index construction: the
-  concatenated token stream is divided into non-overlapping windows of
-  ``seq_length`` tokens, with the last partial window optionally
-  dropped.
-
-  Args:
-      inner_source: A ``MMapIndexedDataSource`` or
-          ``MultiShardMMapIndexedDataSource`` that yields
-          ``{"text": np.array}`` dictionaries.
-      seq_length: Number of tokens per sample.
-      eod_id: Token ID used for document boundaries and padding
-          (typically ``mmap_eod_id``).  The dataloader does not insert EOD
-          tokens; it only uses this value for tail-sample padding and
-          for the startup presence check.
-      drop_last: If True (default), the last partial sample is dropped.
+  ``mmap`` is the simple sequential mode. Unlike ``mmap_npy``, it does not
+  reproduce Megatron's document/sample/shuffle index ordering; it only
+  provides fixed-length windows for the Grain pipeline. The input must
+  already contain EOD tokens when document-boundary semantics matter.
   """
 
   def __init__(self, inner_source, seq_length: int, eod_id: int, drop_last: bool = True):
+    if seq_length <= 0:
+      raise ValueError(f"seq_length must be positive, got {seq_length}")
     self._inner_source = inner_source
     self._seq_length = seq_length
     self._eod_id = eod_id
     self._drop_last = drop_last
-    self._build_sample_index()
-    self._inner_source.check_eod_presence(self._eod_id, "mmap mode")
-
-  def _get_idx_paths(self):
-    """Get all .idx file paths from the inner source for cache validation."""
-    if isinstance(self._inner_source, MMapIndexedDataSource):
-      return [self._inner_source._path_prefix + ".idx"]  # pylint: disable=protected-access
-    elif isinstance(self._inner_source, MultiShardMMapIndexedDataSource):
-      return [p + ".idx" for p in self._inner_source._path_prefixes]  # pylint: disable=protected-access
-    return []
-
-  def _get_cache_path(self):
-    """Derive a deterministic cache path for the cum_tokens .npy file.
-
-    The cum_tokens array depends only on the document structure (raw
-    token counts), not on ``seq_length`` or ``eod_id``, so the same
-    cache can be reused across different training configurations.
-    """
-    if isinstance(self._inner_source, MMapIndexedDataSource):
-      prefix = self._inner_source._path_prefix  # pylint: disable=protected-access
-      ss = "ss" if self._inner_source._split_sentences else "ns"  # pylint: disable=protected-access
-      return f"{prefix}_cum_tokens_v2_{ss}.npy"
-    elif isinstance(self._inner_source, MultiShardMMapIndexedDataSource):
-      prefixes = self._inner_source._path_prefixes  # pylint: disable=protected-access
-      ss = "ss" if self._inner_source._split_sentences else "ns"  # pylint: disable=protected-access
-      key = f"{ss}|" + "|".join(sorted(prefixes))
-      h = hashlib.md5(key.encode()).hexdigest()[:16]
-      base_dir = os.path.dirname(prefixes[0]) if prefixes else "."
-      return os.path.join(base_dir, f"_cum_tokens_v2_{h}.npy")
-    return None
-
-  def _is_cache_valid(self, cache_path):
-    """Check if cache exists and is newer than all source .idx files."""
-    if not os.path.exists(cache_path):
-      return False
-    cache_mtime = os.path.getmtime(cache_path)
-    for idx_path in self._get_idx_paths():
-      if os.path.exists(idx_path) and os.path.getmtime(idx_path) > cache_mtime:
-        return False
-    return True
-
-  def _build_sample_index(self):
-    """Compute cumulative token positions for the raw document stream.
-
-    Results are cached as .npy files next to the source data for fast
-    subsequent loads (similar to Megatron-LM's index caching).
-    """
-    cache_path = self._get_cache_path()
-    loaded_from_cache = False
-
-    if cache_path and self._is_cache_valid(cache_path):
-      try:
-        self._cum_tokens = np.load(cache_path)
-        loaded_from_cache = True
-        log.info(
-            "Loaded cum_tokens from cache: %s (%d docs)",
-            cache_path,
-            len(self._cum_tokens),
-        )
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        log.warning("Failed to load cache %s, recomputing: %s", cache_path, e)
-
-    if not loaded_from_cache:
-      doc_counts = self._inner_source.doc_token_counts()
-      tokens_per_doc = doc_counts.astype(np.int64)
-      self._cum_tokens = np.cumsum(tokens_per_doc)
-      log.info("Computed cum_tokens for %d docs", len(self._cum_tokens))
-
-      if cache_path:
-        try:
-          tmp_path = cache_path + f".tmp.{os.getpid()}"
-          np.save(tmp_path, self._cum_tokens)
-          # np.save appends .npy when the path lacks it
-          if not tmp_path.endswith(".npy"):
-            tmp_path += ".npy"
-          os.replace(tmp_path, cache_path)
-          log.info("Saved cum_tokens cache: %s", cache_path)
-        except OSError as e:
-          log.warning("Could not save cache %s: %s", cache_path, e)
-
-    num_docs = len(self._cum_tokens)
-    total_tokens = int(self._cum_tokens[-1]) if num_docs > 0 else 0
-    if self._drop_last:
-      self._num_samples = total_tokens // self._seq_length
-    else:
-      self._num_samples = (total_tokens + self._seq_length - 1) // self._seq_length
+    self._cumulative_tokens = np.cumsum(inner_source.doc_token_counts(), dtype=np.int64)
+    total_tokens = int(self._cumulative_tokens[-1]) if len(self._cumulative_tokens) else 0
+    self._num_samples = total_tokens // seq_length if drop_last else (total_tokens + seq_length - 1) // seq_length
+    inner_source.check_eod_presence(eod_id, "mmap mode")
 
   def __len__(self):
     return self._num_samples
@@ -659,36 +558,21 @@ class MMapSampleIndexDataSource(grain.RandomAccessDataSource):
     if idx < 0 or idx >= self._num_samples:
       raise IndexError(f"Sample index {idx} out of range for dataset with " f"{self._num_samples} samples")
 
-    start_token = idx * self._seq_length
+    result = np.full(self._seq_length, self._eod_id, dtype=np.int32)
+    global_offset = idx * self._seq_length
+    doc_idx = int(np.searchsorted(self._cumulative_tokens, global_offset, side="right"))
+    output_offset = 0
 
-    # Find the first document that contains start_token.
-    # cum_tokens[d] = total raw tokens up to and including doc d.
-    # A token at global position p belongs to doc d where cum_tokens[d-1] <= p < cum_tokens[d].
-    doc_idx = int(np.searchsorted(self._cum_tokens, start_token, side="right"))
-
-    result = np.empty(self._seq_length, dtype=np.int32)
-    pos = 0  # position in result buffer
-    global_pos = start_token
-    num_docs = len(self._cum_tokens)
-
-    while pos < self._seq_length and doc_idx < num_docs:
-      # Start of this document's token range in the global stream
-      doc_global_start = int(self._cum_tokens[doc_idx - 1]) if doc_idx > 0 else 0
-      doc_token_count = int(self._cum_tokens[doc_idx]) - doc_global_start
-
-      offset_in_doc = global_pos - doc_global_start
-      copy_len = min(doc_token_count - offset_in_doc, self._seq_length - pos)
+    while output_offset < self._seq_length and doc_idx < len(self._cumulative_tokens):
+      doc_start = int(self._cumulative_tokens[doc_idx - 1]) if doc_idx else 0
+      offset_in_doc = global_offset - doc_start
       doc_tokens = self._inner_source[doc_idx]["text"]
-      result[pos : pos + copy_len] = doc_tokens[offset_in_doc : offset_in_doc + copy_len]
-      pos += copy_len
-      global_pos += copy_len
-      if offset_in_doc + copy_len >= doc_token_count:
-        doc_idx += 1
-
-    # If we ran out of docs (shouldn't happen with drop_last=True),
-    # pad the remainder
-    if pos < self._seq_length:
-      result[pos:] = self._eod_id
+      copy_length = min(len(doc_tokens) - offset_in_doc, self._seq_length - output_offset)
+      if copy_length > 0:
+        result[output_offset : output_offset + copy_length] = doc_tokens[offset_in_doc : offset_in_doc + copy_length]
+        output_offset += copy_length
+        global_offset += copy_length
+      doc_idx += 1
 
     return {"text": result}
 
@@ -701,12 +585,7 @@ class MMapSampleIndexDataSource(grain.RandomAccessDataSource):
     }
 
   def __setstate__(self, state):
-    self.__init__(
-        state["inner_source"],
-        state["seq_length"],
-        state["eod_id"],
-        state["drop_last"],
-    )
+    self.__init__(**state)
 
 
 def _resolve_bin_prefixes(bin_paths):
@@ -1118,22 +997,12 @@ def _parse_mmap_npy_spec(spec):
 
 
 def create_mmap_source(path_prefix, split_sentences, seq_length, eod_id):
-  """Create a ``grain.MapDataset`` from a single MMap path prefix or directory.
-
-  If *path_prefix* is a directory, all ``.idx`` files inside it are treated
-  as shards of a single logical dataset.  When both *seq_length* and *eod_id*
-  are provided, the document stream is segmented into fixed-length samples
-  via :class:`MMapSampleIndexDataSource`.
-  """
-  path_prefix = path_prefix.strip()
-  if os.path.isdir(path_prefix):
-    idx_files = sorted(_glob.glob(os.path.join(path_prefix, "*.idx")))
-    if not idx_files:
-      raise FileNotFoundError(f"No .idx files found in directory: {path_prefix}")
-    prefixes = [f[:-4] for f in idx_files]  # strip .idx extension
-    source = MultiShardMMapIndexedDataSource(prefixes, split_sentences=split_sentences)
+  """Create a Grain map dataset for a simple MMap path or shard directory."""
+  prefixes = _resolve_bin_prefixes(path_prefix.strip())
+  if len(prefixes) == 1:
+    source = MMapIndexedDataSource(prefixes[0], split_sentences=split_sentences)
   else:
-    source = MMapIndexedDataSource(path_prefix, split_sentences=split_sentences)
+    source = MultiShardMMapIndexedDataSource(prefixes, split_sentences=split_sentences)
   if seq_length and eod_id is not None:
     source = MMapSampleIndexDataSource(source, seq_length=seq_length, eod_id=eod_id)
   return grain.MapDataset.source(source)

@@ -1,7 +1,5 @@
 """Tests for MMap indexed dataset support (Megatron-LM format)."""
 
-# Megatron 数据迁移：mmap 读取与管道测试
-
 # pylint: disable=redefined-outer-name
 
 import os
@@ -25,6 +23,7 @@ from maxtext.input_pipeline._mmap_datasource import (
     MegatronMMapDatasetConfig,
     MMapIndexedDataset,
     MMapIndexedDataSource,
+    MMapSampleIndexDataSource,
 )
 from tests.unit.mmap_test_utils import create_mmap_test_data
 from tests.unit.mmap_test_utils import get_megatron_mmap_dataset as get_datasets
@@ -717,8 +716,8 @@ class TestMMapGrainPipeline:
         break
     assert len(items) > 0
 
-  def test_shuffle_determinism(self, tmp_dir):
-    """Same seed produces same order."""
+  def test_shuffle_seed_controls_order(self, tmp_dir):
+    """The dedicated dataset seed produces deterministic, seed-dependent order."""
     seqs = [np.array([i], dtype=np.int32) for i in range(20)]
     prefix = create_mmap_test_data(os.path.join(tmp_dir, "det"), seqs)
 
@@ -736,7 +735,12 @@ class TestMMapGrainPipeline:
           grain_num_threads=1,
           grain_prefetch_buffer_size=1,
           grain_data_source_max_workers=1,
-          dataset_config=MegatronMMapDatasetConfig(max_target_length=0, eod_id=0, mmap_split_sentences=False),
+          dataset_config=MegatronMMapDatasetConfig(
+              max_target_length=0,
+              eod_id=0,
+              mmap_split_sentences=False,
+              seed=seed,
+          ),
       )
       items = []
       for item in ds:
@@ -747,7 +751,10 @@ class TestMMapGrainPipeline:
 
     order1 = get_order(42)
     order2 = get_order(42)
+    order3 = get_order(43)
     assert order1 == order2
+    assert sorted(order1) == sorted(order3)
+    assert order1 != order3
 
   def test_multi_host_shard_no_overlap(self, tmp_dir):
     """Two hosts with shard 0/2 and 1/2 produce disjoint data."""
@@ -1444,11 +1451,57 @@ class TestMMapSampleIndexNoEodInsertion:
   def tmp_dir(self, tmp_path):
     return str(tmp_path)
 
+  @pytest.mark.parametrize("seq_length", [0, -1])
+  def test_nonpositive_seq_length_raises(self, tmp_dir, seq_length):
+    """Sequential mmap windows require a positive token length."""
+    prefix = create_mmap_test_data(
+        os.path.join(tmp_dir, "invalid_length"),
+        sequences=[np.array([10, 11, 0], dtype=np.int32)],
+        doc_boundaries=[0, 1],
+    )
+    inner = MMapIndexedDataSource(prefix, split_sentences=True)
+    with pytest.raises(ValueError, match="seq_length must be positive"):
+      MMapSampleIndexDataSource(inner_source=inner, seq_length=seq_length, eod_id=0)
+
+  def test_cumulative_tokens_stay_in_memory(self, tmp_dir):
+    """Constructing direct mmap windows must not write beside source data."""
+    prefix = create_mmap_test_data(
+        os.path.join(tmp_dir, "no_runtime_cache"),
+        sequences=[
+            np.array([10, 11, 0], dtype=np.int32),
+            np.array([20, 21, 0], dtype=np.int32),
+        ],
+        doc_boundaries=[0, 1, 2],
+    )
+    inner = MMapIndexedDataSource(prefix, split_sentences=True)
+    source = MMapSampleIndexDataSource(inner_source=inner, seq_length=4, eod_id=0)
+
+    assert len(source) == 1
+    assert not [name for name in os.listdir(tmp_dir) if "cum_tokens" in name]
+
+  def test_drop_last_false_pads_only_the_tail(self, tmp_dir):
+    """The optional final partial window is padded with the configured EOD."""
+    eod_id = 99
+    prefix = create_mmap_test_data(
+        os.path.join(tmp_dir, "padded_tail"),
+        sequences=[np.array([10, 11, eod_id], dtype=np.int32)],
+        doc_boundaries=[0, 1],
+    )
+    inner = MMapIndexedDataSource(prefix, split_sentences=True)
+    source = MMapSampleIndexDataSource(
+        inner_source=inner,
+        seq_length=2,
+        eod_id=eod_id,
+        drop_last=False,
+    )
+
+    assert len(source) == 2
+    np.testing.assert_array_equal(source[0]["text"], np.array([10, 11], dtype=np.int32))
+    np.testing.assert_array_equal(source[1]["text"], np.array([eod_id, eod_id], dtype=np.int32))
+
   def test_eod_from_data_preserved(self, tmp_dir):
     """Docs preprocessed with --append-eod: EOD appears in output from
     raw data (not inserted by dataloader), and no double EOD."""
-    from maxtext.input_pipeline._mmap_datasource import MMapSampleIndexDataSource  # pylint: disable=import-outside-toplevel
-
     eod_id = 0
     # Documents already contain trailing EOD (--append-eod)
     prefix = create_mmap_test_data(
@@ -1491,7 +1544,6 @@ class TestMMapSampleIndexNoEodInsertion:
     """Docs without trailing EOD: verify NO eod is inserted by the
     dataloader, and a warning is emitted."""
     import logging  # pylint: disable=import-outside-toplevel
-    from maxtext.input_pipeline._mmap_datasource import MMapSampleIndexDataSource  # pylint: disable=import-outside-toplevel
 
     eod_id = 0
     prefix = create_mmap_test_data(
@@ -1534,8 +1586,6 @@ class TestMMapSampleIndexNoEodInsertion:
   def test_num_samples_exact_with_append_eod(self, tmp_dir):
     """With --append-eod docs, len(ds) == total_raw_tokens // seq_length
     (no inflation from +1 per doc)."""
-    from maxtext.input_pipeline._mmap_datasource import MMapSampleIndexDataSource  # pylint: disable=import-outside-toplevel
-
     eod_id = 0
     sequences = [
         np.array([10, 11, 12, eod_id], dtype=np.int32),  # 4 tokens
@@ -1563,8 +1613,6 @@ class TestMMapSampleIndexNoEodInsertion:
 
   def test_cross_boundary_no_token_overlap(self, tmp_dir):
     """Adjacent samples have no overlapping content tokens."""
-    from maxtext.input_pipeline._mmap_datasource import MMapSampleIndexDataSource  # pylint: disable=import-outside-toplevel
-
     eod_id = 0
     prefix = create_mmap_test_data(
         os.path.join(tmp_dir, "data"),

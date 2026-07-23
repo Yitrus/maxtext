@@ -1,7 +1,5 @@
 """Tests for MegatronNpyDataSource and its helper functions."""
 
-# Megatron 数据迁移：预构建索引数据源测试
-
 import os
 import pickle
 import tempfile
@@ -561,24 +559,6 @@ class TestMmapNpyPipelineIntegration:
           dataset_config=MegatronMMapDatasetConfig(
               max_target_length=sample_dataset["seq_length"], eod_id=0, mmap_split_sentences=False
           ),
-      )
-
-  def test_unsupported_file_type_error_includes_mmap_npy(self):
-    """Error message for unsupported file types now mentions mmap_npy."""
-    with pytest.raises(ValueError, match="mmap_npy"):
-      get_datasets(
-          data_file_pattern="dummy",
-          data_file_type="unsupported_type",
-          shuffle=False,
-          shuffle_seed=0,
-          shuffle_buffer_size=0,
-          num_epoch=1,
-          dataloading_host_index=0,
-          dataloading_host_count=1,
-          grain_worker_count=0,
-          grain_num_threads=1,
-          grain_prefetch_buffer_size=1,
-          grain_data_source_max_workers=1,
       )
 
 

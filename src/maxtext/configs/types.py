@@ -1311,24 +1311,40 @@ class GrainDataset(BaseModel):
 class MegatronMMapDataset(BaseModel):
   """Configuration for ``dataset_type='megatron_mmap'`` sources."""
 
-  megatron_train_files: PathStr = Field("", description="Training Megatron mmap dataset specification.")
-  megatron_eval_files: PathStr = Field("", description="Evaluation Megatron mmap dataset specification.")
+  megatron_train_files: PathStr = Field(
+      "", description="Training spec: mmap prefix/directory, or mmap_npy 'index_dir|data_prefixes'; supports mixtures."
+  )
+  megatron_eval_files: PathStr = Field(
+      "", description="Evaluation spec in the selected mode; required when evaluation is enabled."
+  )
   megatron_mmap_mode: Literal["mmap", "mmap_npy"] = Field(
-      "mmap_npy", description="Megatron source format: direct mmap or indexed mmap_npy."
+      "mmap_npy", description="Megatron source mode: direct sequential mmap or Megatron-compatible mmap_npy."
   )
 
-  mmap_eod_id: int = Field(0, description="End-of-document token ID for Megatron mmap data.")
-  blend_cache_dir: PathStr = Field("", description="Cache directory for generated Megatron blend indices.")
-  blend_index_dir: PathStr = Field("", description="Directory for pre-generated Megatron blend indices.")
-  reset_attention_mask: bool = Field(True, description="Reset attention and positions after every EOD token.")
-  eod_mask_loss: bool = Field(False, description="Exclude EOD tokens from the loss.")
+  mmap_eod_id: int = Field(0, description="EOD token ID already present in the preprocessed Megatron data.")
+  blend_cache_dir: PathStr = Field(
+      "", description="Optional runtime cache for multi-dataset mmap_npy global blend dispatch indices."
+  )
+  blend_index_dir: PathStr = Field(
+      "", description="Optional directory containing pre-generated dataset_index.npy and dataset_sample_index.npy."
+  )
+  reset_attention_mask: bool = Field(
+      True, description="Start a new attention segment and reset positions after every retained EOD boundary."
+  )
+  eod_mask_loss: bool = Field(False, description="Exclude positions whose input token is EOD from the loss.")
   packing_max_segments_per_sample: int = Field(
-      25, description="Megatron short-segment merge divisor; set <=0 to disable merging."
+      25,
+      description=(
+          "Short-segment merge divisor: max_target_length // value. Only used with reset_attention_mask=True; "
+          "set <=0 to retain every EOD boundary."
+      ),
   )
   mmap_split_sentences: bool = Field(
-      False, description="Use document-level indexing for sentence-split Megatron mmap data."
+      False, description="Whether preprocessing used --split-sentences; enables document-level indexing when true."
   )
-  mmap_npy_split: str = Field("", description="Megatron split ratio, e.g. '99,1' or '98,1,1'.")
+  mmap_npy_split: str = Field(
+      "", description="mmap_npy split ratio, e.g. '99,1'; training uses split 0 and evaluation uses split 1."
+  )
 
 
 class OlmoGrainDataset(BaseModel):

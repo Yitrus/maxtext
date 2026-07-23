@@ -26,6 +26,7 @@ from maxtext.input_pipeline._mmap_datasource import MegatronMMapDatasetConfig
 from maxtext.input_pipeline._mmap_datasource import get_mmap_dataset
 from maxtext.input_pipeline._mmap_datasource import get_mmap_npy_dataset
 from maxtext.input_pipeline.grain_data_processing import _apply_mapdataset_transforms
+from maxtext.utils import max_logging
 
 
 def _build_dataset_config(config, *, num_samples, split_index):
@@ -154,6 +155,13 @@ def _preprocess(
     dataset = dataset.mp_prefetch(_multiprocessing_options(dataset, config, worker_count, per_worker_buffer_size))
   dataset = dataset.batch(batch_size, batch_fn=batch_fn)
   if mode == "mmap":
+    if not config.eod_mask_loss:
+      max_logging.warning(
+          "WARNING: mmap mode with eod_mask_loss=False uses mmap_eod_id as both "
+          "padding and EOD sentinel. ShiftData will zero targets_segmentation "
+          "at all EOD positions, effectively masking EOD from loss regardless "
+          "of eod_mask_loss. Use mmap_npy mode for correct eod_mask_loss=False behavior."
+      )
     dataset = dataset.map(input_pipeline_utils.ShiftData(ignored_ids=[eod_id], axis=1))
     dataset = dataset.mp_prefetch(_multiprocessing_options(dataset, config, worker_count, per_worker_buffer_size))
   return dataset

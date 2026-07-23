@@ -1,13 +1,10 @@
 """Megatron-compatible dataset blending for Grain MapDatasets."""
 
-# Megatron 数据迁移：多数据集权重混合
-
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
-import math
 import os
 from pathlib import Path
 from typing import Sequence, TypeVar
@@ -131,19 +128,6 @@ def _infer_size_from_lengths(weights: np.ndarray, dataset_lengths: Sequence[int]
         f"Inferred blend size {size} is not positive for lengths={dataset_lengths}, " f"weights={weights.tolist()}"
     )
   return size
-
-
-def _megatron_blend_size(requested_size: int, weights: np.ndarray) -> int:
-  """Compute the blend size the same way Megatron's builder does.
-
-  Megatron computes per-dataset target counts as ceil(requested_size * w_i)
-  and uses their sum as the total blend size.  Because of ceiling, the result
-  can be up to (num_datasets - 1) larger than *requested_size*.
-
-  See ``_get_size_per_split_per_dataset`` in
-  ``megatron/core/datasets/blended_megatron_dataset_builder.py``.
-  """
-  return sum(math.ceil(requested_size * float(w)) for w in weights)
 
 
 def _build_cache_key(
@@ -352,10 +336,17 @@ def _load_or_build_blend_indices(
       num_datasets=num_datasets,
       size=size,
   )
+  _validate_indices(
+      dataset_index,
+      dataset_sample_index,
+      num_datasets,
+      dataset_lengths,
+      expected_size=size,
+  )
 
   if cache_paths and _mmap_index_utils.is_primary_process():
-    os.makedirs(cache_dir, exist_ok=True)
     try:
+      os.makedirs(cache_dir, exist_ok=True)
       _mmap_index_utils.save_npy_atomic(cache_paths[0], dataset_index)
       _mmap_index_utils.save_npy_atomic(cache_paths[1], dataset_sample_index)
       logger.info(
@@ -367,6 +358,49 @@ def _load_or_build_blend_indices(
       logger.warning("Failed to save blend cache to %s: %s", cache_dir, error)
 
   return dataset_index, dataset_sample_index
+
+
+def build_and_save_blend_indices(
+    output_dir: str,
+    weights: Sequence[float],
+    dataset_lengths: Sequence[int],
+    size: int,
+) -> dict[str, Path]:
+  """Build the fixed-name blend index pair accepted by ``blend_index_dir``."""
+  _, normalized_weights, normalized_lengths = _normalize_and_filter_weights(
+      [object()] * len(weights), weights, dataset_lengths
+  )
+  if normalized_lengths is None:
+    raise ValueError("dataset_lengths are required to build blend indices")
+  if size <= 0:
+    raise ValueError(f"size must be positive, got {size}")
+
+  dataset_index = np.zeros(size, dtype=np.int16)
+  dataset_sample_index = np.zeros(size, dtype=np.int64)
+  build_blending_indices(
+      dataset_index=dataset_index,
+      dataset_sample_index=dataset_sample_index,
+      weights=normalized_weights,
+      num_datasets=len(normalized_lengths),
+      size=size,
+  )
+  _validate_indices(
+      dataset_index,
+      dataset_sample_index,
+      len(normalized_lengths),
+      normalized_lengths,
+      expected_size=size,
+  )
+
+  output_path = Path(output_dir)
+  output_path.mkdir(parents=True, exist_ok=True)
+  paths = {
+      "dataset_index": output_path / _DATASET_INDEX_SUFFIX,
+      "dataset_sample_index": output_path / _DATASET_SAMPLE_INDEX_SUFFIX,
+  }
+  _mmap_index_utils.save_npy_atomic(paths["dataset_index"], dataset_index)
+  _mmap_index_utils.save_npy_atomic(paths["dataset_sample_index"], dataset_sample_index)
+  return paths
 
 
 class MegatronBlendedDataSource:
@@ -403,7 +437,7 @@ class MegatronBlendedDataSource:
     if size is None:
       self._size = _infer_size_from_lengths(self._weights, self._dataset_lengths)
     else:
-      self._size = _megatron_blend_size(int(size), self._weights)
+      self._size = int(size)
       if self._size <= 0:
         raise ValueError(f"size must be positive, got {self._size}")
 

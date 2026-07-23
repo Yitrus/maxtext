@@ -721,7 +721,7 @@ use_sft: false
 # sft_train_on_completion_only=false trains on both prompt and completion tokens; trains only on completion tokens otherwise
 sft_train_on_completion_only: false
 
-# dataset_type must be synthetic, hf, grain, tfds
+# dataset_type must be synthetic, hf, grain, tfds, c4_mlperf, olmo_grain, or megatron_mmap
 # details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
 dataset_type: tfds
 # for TFDS input pipeline (dataset_type=tfds)
@@ -769,15 +769,15 @@ grain_use_elastic_iterator: false # For elastic training, set to this true and p
 # Megatron-LM indexed datasets (dataset_type=megatron_mmap).
 megatron_mmap_mode: 'mmap_npy' # mmap_npy (Megatron-parity indices) or mmap (direct source)
 megatron_train_files: '' # mmap_npy: 'npy_dir|bin_prefixes'; mmap: .bin/.idx prefix or weighted ';' mixture
-megatron_eval_files: '' # optional separate evaluation spec in the selected mode
-mmap_eod_id: 0
-blend_cache_dir: ''
-blend_index_dir: ''
-reset_attention_mask: true
-eod_mask_loss: false
-packing_max_segments_per_sample: 25
-mmap_split_sentences: false
-mmap_npy_split: ''
+megatron_eval_files: '' # required when eval_interval > 0; may reuse the train spec with mmap_npy_split
+mmap_eod_id: 0 # must match the EOD token written during Megatron preprocessing
+blend_cache_dir: '' # optional runtime cache for multi-dataset mmap_npy global blend indices
+blend_index_dir: '' # optional prebuilt dataset_index.npy / dataset_sample_index.npy directory
+reset_attention_mask: true # reset attention and positions after EOD
+eod_mask_loss: false # exclude positions whose input token is EOD from loss when true
+packing_max_segments_per_sample: 25 # short-segment divisor; <=0 retains every EOD attention boundary
+mmap_split_sentences: false # must match whether preprocessing used --split-sentences
+mmap_npy_split: '' # mmap_npy only; train uses split 0 and eval uses split 1
 # for using pathways
 colocated_python_data_input: false  # experimental feature, under testing
 
