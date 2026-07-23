@@ -1,7 +1,5 @@
 """Tests for MegatronNpyDataSource and its helper functions."""
 
-# Megatron 数据迁移：预构建索引数据源测试
-
 import os
 import pickle
 import tempfile

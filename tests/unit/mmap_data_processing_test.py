@@ -1,7 +1,5 @@
 """Tests for MMap indexed dataset support (Megatron-LM format)."""
 
-# Megatron 数据迁移：mmap 读取与管道测试
-
 # pylint: disable=redefined-outer-name
 
 import os

@@ -40,7 +40,7 @@ DTYPE_CODES_INV = {v: k for k, v in DTYPE_CODES.items()}
 
 @dataclasses.dataclass(frozen=True)
 class MMapDatasetConfig:
-  """Dataset-specific config for mmap_npy formats."""
+  """Dataset-specific config for the Grain mmap and mmap_npy formats."""
 
   max_target_length: int
   eod_id: int
@@ -546,11 +546,7 @@ class MMapSampleIndexDataSource(grain.RandomAccessDataSource):
     self._drop_last = drop_last
     self._cumulative_tokens = np.cumsum(inner_source.doc_token_counts(), dtype=np.int64)
     total_tokens = int(self._cumulative_tokens[-1]) if len(self._cumulative_tokens) else 0
-    self._num_samples = (
-        total_tokens // seq_length
-        if drop_last
-        else (total_tokens + seq_length - 1) // seq_length
-    )
+    self._num_samples = total_tokens // seq_length if drop_last else (total_tokens + seq_length - 1) // seq_length
     inner_source.check_eod_presence(eod_id, "mmap mode")
 
   def __len__(self):
@@ -573,9 +569,7 @@ class MMapSampleIndexDataSource(grain.RandomAccessDataSource):
       doc_tokens = self._inner_source[doc_idx]["text"]
       copy_length = min(len(doc_tokens) - offset_in_doc, self._seq_length - output_offset)
       if copy_length > 0:
-        result[output_offset : output_offset + copy_length] = doc_tokens[
-            offset_in_doc : offset_in_doc + copy_length
-        ]
+        result[output_offset : output_offset + copy_length] = doc_tokens[offset_in_doc : offset_in_doc + copy_length]
         output_offset += copy_length
         global_offset += copy_length
       doc_idx += 1
@@ -703,8 +697,8 @@ class MegatronNpyDataSource(grain.RandomAccessDataSource):
       npy_dir: Directory containing the three ``*-{document,sample,shuffle}_index.npy`` files.
       bin_paths: Path prefix, directory, or list thereof pointing to the
           Megatron ``.bin/.idx`` data files.
-      eod_id: End-of-document token ID inserted between documents when a
-          sample spans a document boundary.
+      eod_id: End-of-document token ID already present in data produced with
+          Megatron preprocessing. The data source validates but never inserts it.
       seq_length: Maximum number of tokens per sample.  The output is
           truncated to ``seq_length + 1`` tokens (matching Megatron-LM's
           convention where the extra token is used for next-token prediction).

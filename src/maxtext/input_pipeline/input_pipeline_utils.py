@@ -172,7 +172,9 @@ def is_conversational(features, data_columns):
   for column in data_columns:
     messages = features[column]
     if isinstance(messages, datasets.Sequence):
-      if isinstance(messages.feature, dict) and "role" in messages.feature and "content" in messages.feature:  # pyrefly: ignore[missing-attribute]
+      if (
+          isinstance(messages.feature, dict) and "role" in messages.feature and "content" in messages.feature
+      ):  # pyrefly: ignore[missing-attribute]
         return True
 
   return False
@@ -840,11 +842,19 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         if isinstance(element[data_column], mm_utils.PreprocessorOutput):
           raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
 
-        element[f"{data_column}_segmentation"] = element[data_column] != self.pad_id  # pyrefly: ignore[unsupported-operation]
-        element[f"{data_column}_segmentation"] = element[f"{data_column}_segmentation"].astype(np.int32)  # pyrefly: ignore[missing-attribute]
-        element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)  # pyrefly: ignore[missing-attribute]
+        element[f"{data_column}_segmentation"] = (
+            element[data_column] != self.pad_id
+        )  # pyrefly: ignore[unsupported-operation]
+        element[f"{data_column}_segmentation"] = element[f"{data_column}_segmentation"].astype(
+            np.int32
+        )  # pyrefly: ignore[missing-attribute]
+        element[f"{data_column}_position"] = np.arange(
+            element[data_column].shape[0], dtype=np.int32
+        )  # pyrefly: ignore[missing-attribute]
         if self.add_true_length:
-          element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)  # pyrefly: ignore[missing-attribute]
+          element[f"{data_column}_true_length"] = np.array(
+              [element[data_column].shape[0]], dtype=np.int32
+          )  # pyrefly: ignore[missing-attribute]
 
     for key, _ in element.items():
       if key == "images":
@@ -1244,6 +1254,8 @@ class MegatronSplitInputsTargets(grain.MapTransform):
     if self.emit_dataset_id and "dataset_id" in element:
       result["dataset_id"] = np.full(seq_len, int(element["dataset_id"]), dtype=np.int32)
     return result
+
+
 @dataclasses.dataclass
 class ComputeQwen3OmniPositions(grain.MapTransform):
   """Computes 3D position IDs for Qwen3-Omni multimodal sequences.

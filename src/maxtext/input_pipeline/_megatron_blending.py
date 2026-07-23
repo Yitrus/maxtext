@@ -156,18 +156,14 @@ def build_and_save_blend_indices(
   does when it receives the already-normalized mixture weights from the input
   parser.  This keeps an offline pair bit-identical to a runtime-built pair.
   """
-  _, normalized_weights, normalized_lengths = _normalize_datasets(
-      [object()] * len(weights), weights, dataset_lengths
-  )
+  _, normalized_weights, normalized_lengths = _normalize_datasets([object()] * len(weights), weights, dataset_lengths)
   if normalized_lengths is None:
     raise ValueError("dataset_lengths are required to build blend indices")
   if size <= 0:
     raise ValueError(f"size must be positive, got {size}")
   dataset_index = np.zeros(size, dtype=np.int16)
   dataset_sample_index = np.zeros(size, dtype=np.int64)
-  build_blending_indices(
-      dataset_index, dataset_sample_index, normalized_weights, len(normalized_lengths), size
-  )
+  build_blending_indices(dataset_index, dataset_sample_index, normalized_weights, len(normalized_lengths), size)
   _validate_indices(dataset_index, dataset_sample_index, normalized_lengths, size)
   root = Path(output_dir)
   root.mkdir(parents=True, exist_ok=True)
@@ -193,17 +189,13 @@ class MegatronBlendedDataSource:
       blend_index_dir: str | None = None,
       split: str = "train",
   ):
-    self._datasets, self._weights, filtered_lengths = _normalize_datasets(
-        map_datasets, weights, dataset_lengths
-    )
+    self._datasets, self._weights, filtered_lengths = _normalize_datasets(map_datasets, weights, dataset_lengths)
     self._lengths = filtered_lengths if filtered_lengths is not None else [len(dataset) for dataset in self._datasets]
     self._size = _infer_size(self._weights, self._lengths) if size is None else int(size)
     if self._size <= 0:
       raise ValueError(f"size must be positive, got {self._size}")
 
-    self._dataset_index, self._dataset_sample_index = self._load_or_build(
-        cache_dir, blend_index_dir, split
-    )
+    self._dataset_index, self._dataset_sample_index = self._load_or_build(cache_dir, blend_index_dir, split)
 
   def _load_or_build(self, cache_dir, blend_index_dir, split):
     candidates = []
@@ -227,9 +219,7 @@ class MegatronBlendedDataSource:
 
     dataset_index = np.zeros(self._size, dtype=np.int16)
     dataset_sample_index = np.zeros(self._size, dtype=np.int64)
-    build_blending_indices(
-        dataset_index, dataset_sample_index, self._weights, len(self._datasets), self._size
-    )
+    build_blending_indices(dataset_index, dataset_sample_index, self._weights, len(self._datasets), self._size)
     _validate_indices(dataset_index, dataset_sample_index, self._lengths, self._size)
 
     if cache_dir and _mmap_index_utils.is_primary_process():

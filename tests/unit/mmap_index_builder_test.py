@@ -1,7 +1,5 @@
 """Tests for the mmap-to-npy index prebuilder tool."""
 
-# Megatron 数据迁移：索引构建测试
-
 import os
 import subprocess
 import sys

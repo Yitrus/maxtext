@@ -105,9 +105,7 @@ def _make_mmap_multiprocessing_options(dataset, config, grain_worker_count, grai
     return grain.experimental.pick_performance_config(
         ds=dataset, ram_budget_mb=config.grain_ram_budget_mb, max_workers=None, max_buffer_size=None
     ).multiprocessing_options
-  return grain.MultiprocessingOptions(
-      num_workers=grain_worker_count, per_worker_buffer_size=grain_per_worker_buffer_size
-  )
+  return grain.MultiprocessingOptions(num_workers=grain_worker_count, per_worker_buffer_size=grain_per_worker_buffer_size)
 
 
 def get_datasets(
@@ -128,7 +126,7 @@ def get_datasets(
     dataset_config=None,
     split="train",
 ):
-  """Load dataset from array_record files for using with grain"""
+  """Load a Grain dataset for the selected ``grain_file_type``."""
   if data_file_type == "arrayrecord":
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
@@ -298,7 +296,7 @@ def _mmap_pretrain_pipeline(
     grain_per_worker_buffer_size,
 ):
   """Pretrain pipeline for Megatron-compatible mmap / mmap_npy pre-tokenized formats."""
-  # Megatron 数据迁移：EOD、位置与 loss 语义对齐
+  # Match Megatron's EOD, position, and loss semantics.
   eod_id = config.mmap_eod_id
   is_npy = config.grain_file_type == "mmap_npy"
 

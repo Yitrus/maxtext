@@ -296,9 +296,7 @@ def test_mmap_npy_host_shards_reassemble_the_global_order():
     output_dir = os.path.join(tmp_dir, "indices")
     convert([prefix], output_dir, seq_length=seq_length, num_epochs=1, seed=seed)
 
-    global_samples, reassembled = _reassemble_host_strides(
-        f"{output_dir}|{prefix}", seq_length, seed, host_count
-    )
+    global_samples, reassembled = _reassemble_host_strides(f"{output_dir}|{prefix}", seq_length, seed, host_count)
     for index, (expected, actual) in enumerate(zip(global_samples, reassembled)):
       np.testing.assert_array_equal(actual, expected, err_msg=f"Global mmap_npy sample {index}")
 
